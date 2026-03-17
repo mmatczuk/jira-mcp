@@ -11,6 +11,10 @@ import (
 
 type node = map[string]any
 
+// md is a package-level goldmark instance. The default parser is stateless
+// and safe for concurrent use.
+var md = goldmark.New()
+
 // ToADF converts a Markdown string to an ADF document map.
 // Returns nil if the input is empty.
 func ToADF(markdown string) node {
@@ -18,7 +22,6 @@ func ToADF(markdown string) node {
 		return nil
 	}
 
-	md := goldmark.New()
 	reader := text.NewReader([]byte(markdown))
 	doc := md.Parser().Parse(reader)
 
