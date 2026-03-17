@@ -70,18 +70,37 @@ func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOp
 	return issue, err
 }
 
-// SearchIssues runs a JQL query. Returns issues, total count, and error.
+// SearchIssues runs a JQL query using the v3 search/jql endpoint.
+// Returns issues, total count, and error.
 func (c *Client) SearchIssues(ctx context.Context, jql string, opts *jira.SearchOptions) ([]jira.Issue, int, error) {
 	var issues []jira.Issue
 	var total int
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		var resp *jira.Response
-		var err error
-		issues, resp, err = c.J.Issue.SearchWithContext(ctx, jql, opts)
-		if resp != nil {
-			total = resp.Total
+		body := map[string]any{"jql": jql}
+		if opts != nil {
+			body["maxResults"] = opts.MaxResults
+			body["startAt"] = opts.StartAt
+			if len(opts.Fields) > 0 {
+				body["fields"] = opts.Fields
+			}
+			if opts.Expand != "" {
+				body["expand"] = opts.Expand
+			}
 		}
+
+		req, err := c.J.NewRequestWithContext(ctx, "POST", "rest/api/3/search/jql", body)
+		if err != nil {
+			return nil, err
+		}
+
+		var result struct {
+			Issues []jira.Issue `json:"issues"`
+			Total  int         `json:"total"`
+		}
+		resp, err := c.J.Do(req, &result)
 		defer closeResp(resp)
+		issues = result.Issues
+		total = result.Total
 		return resp, err
 	})
 	return issues, total, err
