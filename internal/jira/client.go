@@ -25,7 +25,7 @@ type Config struct {
 
 // Client wraps go-jira with retry on 429 at the call level.
 type Client struct {
-	J   *jira.Client
+	j   *jira.Client
 	cfg Config
 }
 
@@ -48,7 +48,7 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("create jira client: %w", err)
 	}
 
-	return &Client{J: j, cfg: cfg}, nil
+	return &Client{j: j, cfg: cfg}, nil
 }
 
 // GetIssue fetches an issue by key.
@@ -57,7 +57,7 @@ func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOp
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		var resp *jira.Response
 		var err error
-		issue, resp, err = c.J.Issue.GetWithContext(ctx, key, opts)
+		issue, resp, err = c.j.Issue.GetWithContext(ctx, key, opts)
 		return resp, err
 	})
 	return issue, err
@@ -98,7 +98,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 			}
 		}
 
-		req, err := c.J.NewRequestWithContext(ctx, "POST", "rest/api/3/search/jql", body)
+		req, err := c.j.NewRequestWithContext(ctx, "POST", "rest/api/3/search/jql", body)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +108,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 			Total         int          `json:"total"`
 			NextPageToken string       `json:"nextPageToken"`
 		}
-		resp, err := c.J.Do(req, &result)
+		resp, err := c.j.Do(req, &result)
 		sr = SearchResultV3{
 			Issues:        result.Issues,
 			Total:         result.Total,
@@ -122,7 +122,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 // DeleteIssue deletes an issue by key.
 func (c *Client) DeleteIssue(ctx context.Context, key string) error {
 	return c.retry(ctx, func() (*jira.Response, error) {
-		resp, err := c.J.Issue.DeleteWithContext(ctx, key)
+		resp, err := c.j.Issue.DeleteWithContext(ctx, key)
 		return resp, err
 	})
 }
@@ -133,7 +133,7 @@ func (c *Client) GetTransitions(ctx context.Context, key string) ([]jira.Transit
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		var resp *jira.Response
 		var err error
-		transitions, resp, err = c.J.Issue.GetTransitionsWithContext(ctx, key)
+		transitions, resp, err = c.j.Issue.GetTransitionsWithContext(ctx, key)
 		return resp, err
 	})
 	return transitions, err
@@ -142,7 +142,7 @@ func (c *Client) GetTransitions(ctx context.Context, key string) ([]jira.Transit
 // DoTransition performs a transition on an issue.
 func (c *Client) DoTransition(ctx context.Context, key, transitionID string) error {
 	return c.retry(ctx, func() (*jira.Response, error) {
-		resp, err := c.J.Issue.DoTransitionWithContext(ctx, key, transitionID)
+		resp, err := c.j.Issue.DoTransitionWithContext(ctx, key, transitionID)
 		return resp, err
 	})
 }
@@ -154,14 +154,14 @@ func (c *Client) AddComment(ctx context.Context, key string, body any) (string, 
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		path := fmt.Sprintf("rest/api/3/issue/%s/comment", key)
 		payload := map[string]any{"body": body}
-		req, err := c.J.NewRequestWithContext(ctx, "POST", path, payload)
+		req, err := c.j.NewRequestWithContext(ctx, "POST", path, payload)
 		if err != nil {
 			return nil, err
 		}
 		var result struct {
 			ID string `json:"id"`
 		}
-		resp, err := c.J.Do(req, &result)
+		resp, err := c.j.Do(req, &result)
 		commentID = result.ID
 		return resp, err
 	})
@@ -173,11 +173,11 @@ func (c *Client) UpdateComment(ctx context.Context, key, commentID string, body 
 	return c.retry(ctx, func() (*jira.Response, error) {
 		path := fmt.Sprintf("rest/api/3/issue/%s/comment/%s", key, commentID)
 		payload := map[string]any{"body": body}
-		req, err := c.J.NewRequestWithContext(ctx, "PUT", path, payload)
+		req, err := c.j.NewRequestWithContext(ctx, "PUT", path, payload)
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.J.Do(req, nil)
+		resp, err := c.j.Do(req, nil)
 		return resp, err
 	})
 }
@@ -187,7 +187,7 @@ func (c *Client) GetAllBoards(ctx context.Context, opts *jira.BoardListOptions) 
 	var boards []jira.Board
 	var isLast bool
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		result, resp, err := c.J.Board.GetAllBoardsWithContext(ctx, opts)
+		result, resp, err := c.j.Board.GetAllBoardsWithContext(ctx, opts)
 		if result != nil {
 			boards = result.Values
 			isLast = result.IsLast
@@ -202,7 +202,7 @@ func (c *Client) GetAllSprints(ctx context.Context, boardID int, opts *jira.GetA
 	var sprints []jira.Sprint
 	var isLast bool
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		result, resp, err := c.J.Board.GetAllSprintsWithOptionsWithContext(ctx, boardID, opts)
+		result, resp, err := c.j.Board.GetAllSprintsWithOptionsWithContext(ctx, boardID, opts)
 		if result != nil {
 			sprints = result.Values
 			isLast = result.IsLast
@@ -218,7 +218,7 @@ func (c *Client) GetSprintIssues(ctx context.Context, sprintID int) ([]jira.Issu
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		var resp *jira.Response
 		var err error
-		issues, resp, err = c.J.Sprint.GetIssuesForSprintWithContext(ctx, sprintID)
+		issues, resp, err = c.j.Sprint.GetIssuesForSprintWithContext(ctx, sprintID)
 		return resp, err
 	})
 	return issues, err
@@ -227,7 +227,7 @@ func (c *Client) GetSprintIssues(ctx context.Context, sprintID int) ([]jira.Issu
 // MoveIssuesToSprint moves issues to a sprint.
 func (c *Client) MoveIssuesToSprint(ctx context.Context, sprintID int, issueKeys []string) error {
 	return c.retry(ctx, func() (*jira.Response, error) {
-		resp, err := c.J.Sprint.MoveIssuesToSprintWithContext(ctx, sprintID, issueKeys)
+		resp, err := c.j.Sprint.MoveIssuesToSprintWithContext(ctx, sprintID, issueKeys)
 		return resp, err
 	})
 }
@@ -238,7 +238,7 @@ func (c *Client) GetAllProjects(ctx context.Context) (*jira.ProjectList, error) 
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		var resp *jira.Response
 		var err error
-		projects, resp, err = c.J.Project.ListWithOptionsWithContext(ctx, &jira.GetQueryOptions{})
+		projects, resp, err = c.j.Project.ListWithOptionsWithContext(ctx, &jira.GetQueryOptions{})
 		return resp, err
 	})
 	return projects, err
@@ -250,7 +250,7 @@ func (c *Client) GetFields(ctx context.Context) ([]jira.Field, error) {
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		var resp *jira.Response
 		var err error
-		fields, resp, err = c.J.Field.GetListWithContext(ctx)
+		fields, resp, err = c.j.Field.GetListWithContext(ctx)
 		return resp, err
 	})
 	return fields, err
@@ -261,7 +261,7 @@ func (c *Client) GetFields(ctx context.Context) ([]jira.Field, error) {
 func (c *Client) CreateIssueV3(ctx context.Context, payload map[string]any) (string, string, error) {
 	var key, id string
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		req, err := c.J.NewRequestWithContext(ctx, "POST", "rest/api/3/issue", payload)
+		req, err := c.j.NewRequestWithContext(ctx, "POST", "rest/api/3/issue", payload)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +269,7 @@ func (c *Client) CreateIssueV3(ctx context.Context, payload map[string]any) (str
 			ID  string `json:"id"`
 			Key string `json:"key"`
 		}
-		resp, err := c.J.Do(req, &result)
+		resp, err := c.j.Do(req, &result)
 		key = result.Key
 		id = result.ID
 		return resp, err
@@ -281,11 +281,11 @@ func (c *Client) CreateIssueV3(ctx context.Context, payload map[string]any) (str
 func (c *Client) UpdateIssueV3(ctx context.Context, key string, payload map[string]any) error {
 	return c.retry(ctx, func() (*jira.Response, error) {
 		path := fmt.Sprintf("rest/api/3/issue/%s", key)
-		req, err := c.J.NewRequestWithContext(ctx, "PUT", path, payload)
+		req, err := c.j.NewRequestWithContext(ctx, "PUT", path, payload)
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.J.Do(req, nil)
+		resp, err := c.j.Do(req, nil)
 		return resp, err
 	})
 }
@@ -295,7 +295,7 @@ func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.Ra
 	var values []json.RawMessage
 	err := c.retry(ctx, func() (*jira.Response, error) {
 		path := fmt.Sprintf("rest/api/3/field/%s/context", fieldID)
-		req, err := c.J.NewRequestWithContext(ctx, "GET", path, nil)
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +304,7 @@ func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.Ra
 				ID string `json:"id"`
 			} `json:"values"`
 		}
-		resp, err := c.J.Do(req, &ctxResult)
+		resp, err := c.j.Do(req, &ctxResult)
 		if err != nil {
 			return resp, err
 		}
@@ -315,14 +315,14 @@ func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.Ra
 		contextID := ctxResult.Values[0].ID
 
 		optPath := fmt.Sprintf("rest/api/3/field/%s/context/%s/option", fieldID, contextID)
-		optReq, err := c.J.NewRequestWithContext(ctx, "GET", optPath, nil)
+		optReq, err := c.j.NewRequestWithContext(ctx, "GET", optPath, nil)
 		if err != nil {
 			return nil, err
 		}
 		var optResult struct {
 			Values []json.RawMessage `json:"values"`
 		}
-		optResp, err := c.J.Do(optReq, &optResult)
+		optResp, err := c.j.Do(optReq, &optResult)
 		values = optResult.Values
 		return optResp, err
 	})
