@@ -119,26 +119,6 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 	return &sr, err
 }
 
-// CreateIssue creates a new issue.
-func (c *Client) CreateIssue(ctx context.Context, issue *jira.Issue) (*jira.Issue, error) {
-	var created *jira.Issue
-	err := c.retry(ctx, func() (*jira.Response, error) {
-		var resp *jira.Response
-		var err error
-		created, resp, err = c.J.Issue.CreateWithContext(ctx, issue)
-		return resp, err
-	})
-	return created, err
-}
-
-// UpdateIssue updates an existing issue.
-func (c *Client) UpdateIssue(ctx context.Context, issue *jira.Issue) error {
-	return c.retry(ctx, func() (*jira.Response, error) {
-		_, resp, err := c.J.Issue.UpdateWithContext(ctx, issue)
-		return resp, err
-	})
-}
-
 // DeleteIssue deletes an issue by key.
 func (c *Client) DeleteIssue(ctx context.Context, key string) error {
 	return c.retry(ctx, func() (*jira.Response, error) {
@@ -274,18 +254,6 @@ func (c *Client) GetFields(ctx context.Context) ([]jira.Field, error) {
 		return resp, err
 	})
 	return fields, err
-}
-
-// DoRaw executes a raw HTTP request against the JIRA API.
-func (c *Client) DoRaw(ctx context.Context, method, path string, body any, result any) error {
-	return c.retry(ctx, func() (*jira.Response, error) {
-		req, err := c.J.NewRequestWithContext(ctx, method, path, body)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := c.J.Do(req, result)
-		return resp, err
-	})
 }
 
 // CreateIssueV3 creates an issue using REST API v3 with raw JSON payload.
