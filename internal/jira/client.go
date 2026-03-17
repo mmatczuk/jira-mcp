@@ -354,15 +354,21 @@ func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.Ra
 }
 
 func (c *Client) shouldRetry(resp *jira.Response) (time.Duration, bool) {
-	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+	if resp == nil {
 		return 0, false
 	}
-	if ra := resp.Header.Get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil {
-			return time.Duration(secs) * time.Second, true
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil {
+				return time.Duration(secs) * time.Second, true
+			}
 		}
+		return 0, true
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return 0, true
 	}
-	return 0, true
+	return 0, false
 }
 
 func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
