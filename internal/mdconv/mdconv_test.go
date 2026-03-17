@@ -212,6 +212,75 @@ func TestToADF_Image(t *testing.T) {
 	assert.True(t, found, "expected image converted to linked text")
 }
 
+func TestToADF_HardLineBreak(t *testing.T) {
+	// Two trailing spaces before newline = hard line break in Markdown.
+	result := ToADF("line one  \nline two")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+
+	found := false
+	for _, inline := range inlines {
+		if n, ok := inline.(node); ok && n["type"] == "hardBreak" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected a hardBreak node")
+}
+
+func TestToADF_AutoLink(t *testing.T) {
+	result := ToADF("<https://example.com>")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+
+	found := false
+	for _, inline := range inlines {
+		n := inline.(node)
+		if marks, ok := n["marks"]; ok {
+			for _, mark := range marks.([]any) {
+				if m, ok := mark.(node); ok && m["type"] == "link" {
+					attrs := m["attrs"].(node)
+					if attrs["href"] == "https://example.com" {
+						found = true
+					}
+				}
+			}
+		}
+	}
+	assert.True(t, found, "expected autolink converted to link-marked text node")
+}
+
+func TestToADF_NestedList(t *testing.T) {
+	md := "- item one\n  - nested a\n  - nested b\n- item two"
+	result := ToADF(md)
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	outerList := content[0].(node)
+	assert.Equal(t, "bulletList", outerList["type"])
+
+	items := outerList["content"].([]any)
+	require.GreaterOrEqual(t, len(items), 2)
+
+	// First list item should contain a nested bulletList.
+	firstItem := items[0].(node)
+	firstItemContent := firstItem["content"].([]any)
+	found := false
+	for _, c := range firstItemContent {
+		if n, ok := c.(node); ok && n["type"] == "bulletList" {
+			found = true
+			nestedItems := n["content"].([]any)
+			assert.Len(t, nestedItems, 2)
+		}
+	}
+	assert.True(t, found, "expected nested bulletList inside first list item")
+}
+
 func TestToADF_ThematicBreak(t *testing.T) {
 	result := ToADF("above\n\n---\n\nbelow")
 	require.NotNil(t, result)
