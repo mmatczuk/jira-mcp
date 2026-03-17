@@ -3,12 +3,10 @@ package jiramcp
 
 import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/mmatczuk/jiramcp/internal/jirahttp"
 )
 
 // NewServer creates a configured MCP server with all JIRA tools registered.
-func NewServer(client *jirahttp.Client) *mcp.Server {
+func NewServer(client JiraClient) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "jira-mcp",
