@@ -20,4 +20,4 @@ tasks:
   build:
     desc: Build the MCP server binary
     cmds:
-      - go build -o bin/jiramcp .
+      - go build -o bin/jira-mcp ./cmd/jira-mcp

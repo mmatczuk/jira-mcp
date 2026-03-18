@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,7 +16,22 @@ import (
 	"github.com/mmatczuk/jira-mcp/internal/jiramcp"
 )
 
+// Injected at build time via -ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	versionFlag := flag.Bool("version", false, "print version information and exit")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("version: %s\ncommit:  %s\ndate:    %s\ngo:      %s\n", version, commit, date, runtime.Version())
+		return
+	}
+
 	client, err := jira.New(jira.Config{
 		URL:        requireEnv("JIRA_URL"),
 		Email:      requireEnv("JIRA_EMAIL"),

@@ -45,4 +45,4 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go build -o bin/jiramcp .
+      - run: go build -o bin/jira-mcp ./cmd/jira-mcp
