@@ -288,6 +288,13 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 	return formatReadResult(summary, results, nil)
 }
 
+func userToMap(u *jira.User) map[string]any {
+	return map[string]any{
+		"displayName": u.DisplayName,
+		"accountId":   u.AccountID,
+	}
+}
+
 func issueToMap(issue *jira.Issue) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
@@ -306,7 +313,7 @@ func issueToMap(issue *jira.Issue) map[string]any {
 			fields["type"] = issue.Fields.Type.Name
 		}
 		if issue.Fields.Assignee != nil {
-			fields["assignee"] = issue.Fields.Assignee.DisplayName
+			fields["assignee"] = userToMap(issue.Fields.Assignee)
 		}
 		if issue.Fields.Priority != nil {
 			fields["priority"] = issue.Fields.Priority.Name

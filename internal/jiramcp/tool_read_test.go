@@ -366,7 +366,7 @@ func TestIssueToMap_AllFields(t *testing.T) {
 			Summary:     "Test issue",
 			Status:      &jira.Status{Name: "In Progress"},
 			Type:        jira.IssueType{Name: "Bug"},
-			Assignee:    &jira.User{DisplayName: "Alice"},
+			Assignee:    &jira.User{DisplayName: "Alice", AccountID: "abc123"},
 			Priority:    &jira.Priority{Name: "High"},
 			Description: "A description",
 			Labels:      []string{"backend"},
@@ -383,7 +383,7 @@ func TestIssueToMap_AllFields(t *testing.T) {
 	assert.Equal(t, "Test issue", fields["summary"])
 	assert.Equal(t, "In Progress", fields["status"])
 	assert.Equal(t, "Bug", fields["type"])
-	assert.Equal(t, "Alice", fields["assignee"])
+	assert.Equal(t, map[string]any{"displayName": "Alice", "accountId": "abc123"}, fields["assignee"])
 	assert.Equal(t, "High", fields["priority"])
 	assert.Equal(t, "A description", fields["description"])
 	assert.Equal(t, []string{"backend"}, fields["labels"])
