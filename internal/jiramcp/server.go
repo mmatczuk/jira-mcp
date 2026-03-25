@@ -3,6 +3,7 @@ package jiramcp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -11,11 +12,15 @@ import (
 
 // NewServer creates a configured MCP server with all JIRA tools registered.
 // The currentUser parameter is used to include the authenticated user's
-// identity in the server instructions.
-func NewServer(client JiraClient, currentUser *jira.User) *mcp.Server {
+// identity in the server instructions. The projects parameter lists all
+// available JIRA projects so LLMs know valid project keys upfront.
+func NewServer(client JiraClient, currentUser *jira.User, projects *jira.ProjectList) *mcp.Server {
 	inst := serverInstructions
 	if currentUser != nil {
 		inst += fmt.Sprintf("\n\nCurrent user: %s (accountId: %s)", currentUser.DisplayName, currentUser.AccountID)
+	}
+	if projects != nil && len(*projects) > 0 {
+		inst += "\n\nAvailable projects:\n" + formatProjectList(*projects)
 	}
 
 	s := mcp.NewServer(
@@ -48,3 +53,11 @@ Workflow tips:
 2. Use jira_read with JQL for flexible queries.
 3. All jira_write actions support dry_run=true to preview changes without applying them.
 4. Descriptions and comments accept Markdown — they are auto-converted to Atlassian Document Format.`
+
+func formatProjectList(projects jira.ProjectList) string {
+	var b strings.Builder
+	for _, p := range projects {
+		fmt.Fprintf(&b, "- %s — %s\n", p.Key, p.Name)
+	}
+	return b.String()
+}

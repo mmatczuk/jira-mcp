@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,6 +50,12 @@ Actions:
 - comment: Add comments. Each item needs: key, comment (Markdown).
 - edit_comment: Edit comments. Each item needs: key, comment_id, comment (Markdown).
 - move_to_sprint: Move issues to a sprint. Each item needs: key, sprint_id.
+
+Before creating issues:
+1. Pick the correct project key from the available projects listed.
+2. Use jira_schema resource=fields to discover required and custom fields for the target project/issue type.
+3. Use jira_schema resource=field_options field_id=<id> to find allowed values for select/multiselect custom fields.
+4. Pass custom/required fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
 
 All actions support dry_run=true to preview without executing. Descriptions and comments accept Markdown.`,
 }
@@ -228,12 +235,12 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool)
 
 	if dryRun {
 		data, _ := json.MarshalIndent(payload, "", "  ")
-		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s", item.Project, item.IssueType, string(data)), nil
+		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s\nNote: Required custom fields are not validated locally. Use jira_schema resource=fields to check required fields before submitting.", item.Project, item.IssueType, string(data)), nil
 	}
 
 	key, _, err := h.client.CreateIssueV3(ctx, payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to create issue in %s: %w. Hint: Check project key and issue type name are valid. Use jira_schema resource=fields to see available fields", item.Project, err)
+		return "", fmt.Errorf("failed to create issue in %s: %w; %s", item.Project, err, createErrorHints(err))
 	}
 
 	return fmt.Sprintf("Created %s — %s (project=%s, type=%s). Hint: Use jira_read keys=[\"%s\"] to see the full issue.", key, item.Summary, item.Project, item.IssueType, key), nil
@@ -343,4 +350,32 @@ func (h *handlers) writeEditComment(ctx context.Context, item WriteItem, dryRun 
 	return fmt.Sprintf("Updated comment %s on %s.", item.CommentID, item.Key), nil
 }
 
+var customFieldRe = regexp.MustCompile(`customfield_\d+`)
 
+// createErrorHints parses a Jira create/update error and returns actionable
+// hints about how to resolve field-level validation failures.
+func createErrorHints(err error) string {
+	msg := err.Error()
+
+	fieldIDs := customFieldRe.FindAllString(msg, -1)
+	if len(fieldIDs) == 0 {
+		if strings.Contains(msg, "project") {
+			return "Hint: Use the correct project key."
+		}
+		return "Hint: Check project key and issue type name are valid. Use jira_schema resource=fields to see available fields."
+	}
+
+	seen := map[string]bool{}
+	var hints []string
+	for _, id := range fieldIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		hints = append(hints, fmt.Sprintf(
+			"Use jira_schema resource=field_options field_id=%s to find valid values, then pass via fields_json.", id,
+		))
+	}
+
+	return "Hint: Required custom fields are missing. " + strings.Join(hints, " ")
+}
