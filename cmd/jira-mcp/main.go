@@ -51,7 +51,12 @@ func main() {
 		log.Fatalf("Failed to get current user: %v", err)
 	}
 
-	s := jiramcp.NewServer(client, myself)
+	projects, err := client.GetAllProjects(ctx)
+	if err != nil {
+		log.Fatalf("Failed to list projects: %v", err)
+	}
+
+	s := jiramcp.NewServer(client, myself, projects)
 	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
