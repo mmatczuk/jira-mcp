@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mmatczuk/jira-mcp/internal/jira"
 	"github.com/mmatczuk/jira-mcp/internal/mdconv"
 )
 
@@ -51,13 +52,26 @@ Actions:
 - edit_comment: Edit comments. Each item needs: key, comment_id, comment (Markdown).
 - move_to_sprint: Move issues to a sprint. Each item needs: key, sprint_id.
 
-Before creating issues:
-1. Pick the correct project key from the available projects listed.
-2. Use jira_schema resource=fields to discover required and custom fields for the target project/issue type.
-3. Use jira_schema resource=field_options field_id=<id> to find allowed values for select/multiselect custom fields.
-4. Pass custom/required fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
+Creating issues:
+- Required custom fields are automatically validated before submission. If any are missing, the error lists each field by name with allowed values.
+- Pass custom fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
+- If the issue type is invalid for the project, the error lists available types.
 
 All actions support dry_run=true to preview without executing. Descriptions and comments accept Markdown.`,
+}
+
+// createMetaCache caches create-metadata API responses within a single
+// handleWrite call to avoid redundant requests for batch creates.
+type createMetaCache struct {
+	issueTypes map[string][]jira.CreateMetaIssueType            // project → issue types
+	fields     map[string]map[string][]jira.CreateMetaField     // project → issueTypeID → fields
+}
+
+func newCreateMetaCache() *createMetaCache {
+	return &createMetaCache{
+		issueTypes: make(map[string][]jira.CreateMetaIssueType),
+		fields:     make(map[string]map[string][]jira.CreateMetaField),
+	}
 }
 
 func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args WriteArgs) (*mcp.CallToolResult, any, error) {
@@ -69,6 +83,7 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 		return h.handleMoveToSprint(ctx, args), nil, nil
 	}
 
+	cache := newCreateMetaCache()
 	var results []string
 
 	for i, item := range args.Items {
@@ -78,7 +93,7 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 
 		switch args.Action {
 		case "create":
-			msg, err = h.writeCreate(ctx, item, args.DryRun)
+			msg, err = h.writeCreate(ctx, item, args.DryRun, cache)
 		case "update":
 			msg, err = h.writeUpdate(ctx, item, args.DryRun)
 		case "delete":
@@ -223,7 +238,14 @@ func buildCommentBody(markdown string) any {
 	}
 }
 
-func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+// standardFields are field IDs that buildIssuePayload maps from WriteItem
+// struct fields. They don't need to appear in fields_json.
+var standardFields = map[string]bool{
+	"project": true, "summary": true, "issuetype": true,
+	"priority": true, "assignee": true, "description": true, "labels": true,
+}
+
+func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool, cache *createMetaCache) (string, error) {
 	if item.Project == "" || item.Summary == "" || item.IssueType == "" {
 		return "", fmt.Errorf("create requires project, summary, and issue_type. Got project=%q summary=%q issue_type=%q", item.Project, item.Summary, item.IssueType)
 	}
@@ -233,9 +255,19 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool)
 		return "", err
 	}
 
+	// Preflight: check required fields via create metadata.
+	missingMsg, err := h.preflightRequiredFields(ctx, item, payload, cache)
+	if err != nil {
+		// Non-fatal: if metadata fetch fails, proceed and let Jira reject it.
+		missingMsg = ""
+	}
+	if missingMsg != "" {
+		return "", fmt.Errorf("cannot create issue in %s with type %s: %s", item.Project, item.IssueType, missingMsg)
+	}
+
 	if dryRun {
 		data, _ := json.MarshalIndent(payload, "", "  ")
-		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s\nNote: Required custom fields are not validated locally. Use jira_schema resource=fields to check required fields before submitting.", item.Project, item.IssueType, string(data)), nil
+		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s", item.Project, item.IssueType, string(data)), nil
 	}
 
 	key, _, err := h.client.CreateIssueV3(ctx, payload)
@@ -244,6 +276,92 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool)
 	}
 
 	return fmt.Sprintf("Created %s — %s (project=%s, type=%s). Hint: Use jira_read keys=[\"%s\"] to see the full issue.", key, item.Summary, item.Project, item.IssueType, key), nil
+}
+
+// preflightRequiredFields fetches create metadata and returns an error message
+// listing any required fields that are missing from the payload. Returns ""
+// if all required fields are present.
+func (h *handlers) preflightRequiredFields(ctx context.Context, item WriteItem, payload map[string]any, cache *createMetaCache) (string, error) {
+	// Resolve issue type name → ID, using cache to avoid redundant API calls in batches.
+	issueTypes, ok := cache.issueTypes[item.Project]
+	if !ok {
+		var err error
+		issueTypes, err = h.client.GetCreateMetaIssueTypes(ctx, item.Project)
+		if err != nil {
+			return "", err
+		}
+		cache.issueTypes[item.Project] = issueTypes
+	}
+
+	var issueTypeID string
+	for _, it := range issueTypes {
+		if strings.EqualFold(it.Name, item.IssueType) {
+			issueTypeID = it.ID
+			break
+		}
+	}
+	if issueTypeID == "" {
+		names := make([]string, len(issueTypes))
+		for i, it := range issueTypes {
+			names[i] = it.Name
+		}
+		return fmt.Sprintf("issue type %q not found in project %s. Available types: %s",
+			item.IssueType, item.Project, strings.Join(names, ", ")), nil
+	}
+
+	// Fetch required fields for this project + issue type, using cache.
+	if cache.fields[item.Project] == nil {
+		cache.fields[item.Project] = make(map[string][]jira.CreateMetaField)
+	}
+	metaFields, ok2 := cache.fields[item.Project][issueTypeID]
+	if !ok2 {
+		var err error
+		metaFields, err = h.client.GetCreateMetaFields(ctx, item.Project, issueTypeID)
+		if err != nil {
+			return "", err
+		}
+		cache.fields[item.Project][issueTypeID] = metaFields
+	}
+
+	// Determine which fields are present in the payload.
+	// fields_json values are already merged into payloadFields by buildIssuePayload,
+	// so no separate extraJSON check is needed.
+	payloadFields := payload["fields"].(map[string]any)
+
+	var missing []string
+	for _, f := range metaFields {
+		if !f.Required || f.HasDefaultValue {
+			continue
+		}
+		if standardFields[f.FieldID] {
+			continue
+		}
+		if _, ok := payloadFields[f.FieldID]; ok {
+			continue
+		}
+
+		hint := fmt.Sprintf("- %s (%s): required", f.Name, f.FieldID)
+		if len(f.AllowedValues) > 0 {
+			var vals []string
+			for _, v := range f.AllowedValues {
+				if name, ok := v["value"].(string); ok {
+					vals = append(vals, name)
+				} else if name, ok := v["name"].(string); ok {
+					vals = append(vals, name)
+				}
+			}
+			if len(vals) > 0 {
+				hint += fmt.Sprintf(". Allowed values: %s", strings.Join(vals, ", "))
+			}
+		}
+		missing = append(missing, hint)
+	}
+
+	if len(missing) == 0 {
+		return "", nil
+	}
+
+	return fmt.Sprintf("missing required fields. Pass them via fields_json:\n%s", strings.Join(missing, "\n")), nil
 }
 
 func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool) (string, error) {

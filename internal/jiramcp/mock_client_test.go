@@ -11,24 +11,26 @@ import (
 // mockClient implements JiraClient for testing. Set only the Fn fields your
 // test needs; unset methods panic with a clear message.
 type mockClient struct {
-	GetMyselfFn          func(ctx context.Context) (*jira.User, error)
-	SearchUsersFn        func(ctx context.Context, query string) ([]jira.User, error)
-	GetIssueFn           func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error)
-	SearchIssuesFn       func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
-	CreateIssueV3Fn      func(ctx context.Context, payload map[string]any) (string, string, error)
-	UpdateIssueV3Fn      func(ctx context.Context, key string, payload map[string]any) error
-	DeleteIssueFn        func(ctx context.Context, key string) error
-	DoTransitionFn       func(ctx context.Context, key, transitionID string) error
-	AddCommentFn         func(ctx context.Context, key string, body any) (string, error)
-	UpdateCommentFn      func(ctx context.Context, key, commentID string, body any) error
-	GetAllBoardsFn       func(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
-	GetAllSprintsFn      func(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
-	GetSprintIssuesFn    func(ctx context.Context, sprintID int) ([]jira.Issue, error)
-	MoveIssuesToSprintFn func(ctx context.Context, sprintID int, issueKeys []string) error
-	GetAllProjectsFn     func(ctx context.Context) (*jira.ProjectList, error)
-	GetFieldsFn          func(ctx context.Context) ([]jira.Field, error)
-	GetTransitionsFn     func(ctx context.Context, key string) ([]jira.Transition, error)
-	GetFieldOptionsFn    func(ctx context.Context, fieldID string) ([]json.RawMessage, error)
+	GetMyselfFn               func(ctx context.Context) (*jira.User, error)
+	SearchUsersFn             func(ctx context.Context, query string) ([]jira.User, error)
+	GetCreateMetaIssueTypesFn func(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error)
+	GetCreateMetaFieldsFn     func(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error)
+	GetIssueFn                func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error)
+	SearchIssuesFn            func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
+	CreateIssueV3Fn           func(ctx context.Context, payload map[string]any) (string, string, error)
+	UpdateIssueV3Fn           func(ctx context.Context, key string, payload map[string]any) error
+	DeleteIssueFn             func(ctx context.Context, key string) error
+	DoTransitionFn            func(ctx context.Context, key, transitionID string) error
+	AddCommentFn              func(ctx context.Context, key string, body any) (string, error)
+	UpdateCommentFn           func(ctx context.Context, key, commentID string, body any) error
+	GetAllBoardsFn            func(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
+	GetAllSprintsFn           func(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
+	GetSprintIssuesFn         func(ctx context.Context, sprintID int) ([]jira.Issue, error)
+	MoveIssuesToSprintFn      func(ctx context.Context, sprintID int, issueKeys []string) error
+	GetAllProjectsFn          func(ctx context.Context) (*jira.ProjectList, error)
+	GetFieldsFn               func(ctx context.Context) ([]jira.Field, error)
+	GetTransitionsFn          func(ctx context.Context, key string) ([]jira.Transition, error)
+	GetFieldOptionsFn         func(ctx context.Context, fieldID string) ([]json.RawMessage, error)
 }
 
 func (m *mockClient) GetMyself(ctx context.Context) (*jira.User, error) {
@@ -43,6 +45,20 @@ func (m *mockClient) SearchUsers(ctx context.Context, query string) ([]jira.User
 		panic(fmt.Sprintf("mockClient.SearchUsers called but SearchUsersFn not set (query=%s)", query))
 	}
 	return m.SearchUsersFn(ctx, query)
+}
+
+func (m *mockClient) GetCreateMetaIssueTypes(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error) {
+	if m.GetCreateMetaIssueTypesFn == nil {
+		panic(fmt.Sprintf("mockClient.GetCreateMetaIssueTypes called but GetCreateMetaIssueTypesFn not set (projectKey=%s)", projectKey))
+	}
+	return m.GetCreateMetaIssueTypesFn(ctx, projectKey)
+}
+
+func (m *mockClient) GetCreateMetaFields(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error) {
+	if m.GetCreateMetaFieldsFn == nil {
+		panic(fmt.Sprintf("mockClient.GetCreateMetaFields called but GetCreateMetaFieldsFn not set (projectKey=%s, issueTypeID=%s)", projectKey, issueTypeID))
+	}
+	return m.GetCreateMetaFieldsFn(ctx, projectKey, issueTypeID)
 }
 
 func (m *mockClient) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {

@@ -9,6 +9,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mmatczuk/jira-mcp/internal/jira"
 )
 
 // --- buildIssuePayload ---
@@ -111,6 +113,21 @@ func newWriteHandlers(mc *mockClient) *handlers {
 	return &handlers{client: mc}
 }
 
+// withCreateMeta sets up create metadata mocks that return the given issue type
+// with no extra required fields. Use this for tests that call writeCreate.
+func withCreateMeta(mc *mockClient, issueType string) {
+	mc.GetCreateMetaIssueTypesFn = func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+		return []jira.CreateMetaIssueType{{ID: "1", Name: issueType}}, nil
+	}
+	mc.GetCreateMetaFieldsFn = func(_ context.Context, _, _ string) ([]jira.CreateMetaField, error) {
+		return []jira.CreateMetaField{
+			{FieldID: "summary", Name: "Summary", Required: true},
+			{FieldID: "issuetype", Name: "Issue Type", Required: true},
+			{FieldID: "project", Name: "Project", Required: true},
+		}, nil
+	}
+}
+
 func callWrite(t *testing.T, h *handlers, args WriteArgs) (string, bool) {
 	t.Helper()
 	result, _, err := h.handleWrite(context.Background(), nil, args)
@@ -146,6 +163,7 @@ func TestWriteCreate_Success(t *testing.T) {
 			return "PROJ-1", "10001", nil
 		},
 	}
+	withCreateMeta(mc, "Task")
 	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -185,7 +203,9 @@ func TestWriteCreate_MissingFields(t *testing.T) {
 }
 
 func TestWriteCreate_DryRun(t *testing.T) {
-	h := newWriteHandlers(&mockClient{})
+	mc := &mockClient{}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
 		DryRun: true,
@@ -206,6 +226,7 @@ func TestWriteCreate_ClientError(t *testing.T) {
 			return "", "", fmt.Errorf("permission denied")
 		},
 	}
+	withCreateMeta(mc, "Bug")
 	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -224,6 +245,7 @@ func TestWriteCreate_WithFieldsJSON(t *testing.T) {
 			return "PROJ-2", "10002", nil
 		},
 	}
+	withCreateMeta(mc, "Task")
 	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -661,6 +683,7 @@ func TestHandleWrite_Batch(t *testing.T) {
 			return fmt.Sprintf("PROJ-%d", createCalls), "id", nil
 		},
 	}
+	withCreateMeta(mc, "Task")
 	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -689,6 +712,7 @@ func TestHandleWrite_BatchPartialFailure(t *testing.T) {
 			return fmt.Sprintf("PROJ-%d", call), "id", nil
 		},
 	}
+	withCreateMeta(mc, "Task")
 	h := newWriteHandlers(mc)
 	text, isErr := callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -804,6 +828,7 @@ func TestWriteCreate_DescriptionConvertsToADF(t *testing.T) {
 			return "PROJ-1", "1", nil
 		},
 	}
+	withCreateMeta(mc, "Task")
 	h := newWriteHandlers(mc)
 	callWrite(t, h, WriteArgs{
 		Action: "create",
@@ -825,4 +850,127 @@ func TestWriteCreate_DescriptionConvertsToADF(t *testing.T) {
 
 	heading := content[0].(map[string]any)
 	assert.Equal(t, "heading", heading["type"])
+}
+
+// --- preflight required fields ---
+
+func TestWriteCreate_PreflightMissingRequiredFields(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return []jira.CreateMetaIssueType{{ID: "10", Name: "Bug"}}, nil
+		},
+		GetCreateMetaFieldsFn: func(_ context.Context, _, _ string) ([]jira.CreateMetaField, error) {
+			return []jira.CreateMetaField{
+				{FieldID: "summary", Name: "Summary", Required: true},
+				{FieldID: "issuetype", Name: "Issue Type", Required: true},
+				{FieldID: "project", Name: "Project", Required: true},
+				{FieldID: "customfield_10104", Name: "Kubernetes Environment", Required: true, AllowedValues: []map[string]any{
+					{"value": "Production"}, {"value": "Staging"},
+				}},
+				{FieldID: "customfield_10101", Name: "Redpanda Version", Required: true},
+			}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items:  []WriteItem{{Project: "CON", Summary: "test", IssueType: "Bug"}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "missing required fields")
+	assert.Contains(t, text, "Kubernetes Environment")
+	assert.Contains(t, text, "customfield_10104")
+	assert.Contains(t, text, "Production")
+	assert.Contains(t, text, "Staging")
+	assert.Contains(t, text, "Redpanda Version")
+	assert.Contains(t, text, "customfield_10101")
+}
+
+func TestWriteCreate_PreflightPassesWithFieldsJSON(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return []jira.CreateMetaIssueType{{ID: "10", Name: "Bug"}}, nil
+		},
+		GetCreateMetaFieldsFn: func(_ context.Context, _, _ string) ([]jira.CreateMetaField, error) {
+			return []jira.CreateMetaField{
+				{FieldID: "summary", Name: "Summary", Required: true},
+				{FieldID: "customfield_10104", Name: "K8s Env", Required: true},
+			}, nil
+		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			return "CON-1", "1", nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project:    "CON",
+			Summary:    "test",
+			IssueType:  "Bug",
+			FieldsJSON: `{"customfield_10104": {"value": "Production"}}`,
+		}},
+	})
+	assert.Contains(t, text, "Created CON-1")
+}
+
+func TestWriteCreate_PreflightInvalidIssueType(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return []jira.CreateMetaIssueType{
+				{ID: "1", Name: "Task"},
+				{ID: "2", Name: "Story"},
+			}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Bug"}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "issue type \"Bug\" not found")
+	assert.Contains(t, text, "Task")
+	assert.Contains(t, text, "Story")
+}
+
+func TestWriteCreate_PreflightSkipsFieldsWithDefaults(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return []jira.CreateMetaIssueType{{ID: "1", Name: "Task"}}, nil
+		},
+		GetCreateMetaFieldsFn: func(_ context.Context, _, _ string) ([]jira.CreateMetaField, error) {
+			return []jira.CreateMetaField{
+				{FieldID: "summary", Name: "Summary", Required: true},
+				{FieldID: "customfield_99", Name: "Has Default", Required: true, HasDefaultValue: true},
+			}, nil
+		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			return "P-1", "1", nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Task"}},
+	})
+	assert.Contains(t, text, "Created P-1")
+}
+
+func TestWriteCreate_PreflightMetaFetchFailsGracefully(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return nil, fmt.Errorf("403 forbidden")
+		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			return "P-1", "1", nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Task"}},
+	})
+	// Should proceed despite metadata failure and succeed at API level.
+	assert.Contains(t, text, "Created P-1")
 }

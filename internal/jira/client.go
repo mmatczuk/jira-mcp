@@ -82,6 +82,61 @@ func (c *Client) SearchUsers(ctx context.Context, query string) ([]jira.User, er
 	return users, err
 }
 
+// CreateMetaIssueType represents an issue type returned by the create metadata endpoint.
+type CreateMetaIssueType struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CreateMetaField represents a field returned by the create metadata endpoint.
+type CreateMetaField struct {
+	FieldID         string           `json:"fieldId"`
+	Name            string           `json:"name"`
+	Required        bool             `json:"required"`
+	HasDefaultValue bool             `json:"hasDefaultValue"`
+	AllowedValues   []map[string]any `json:"allowedValues"`
+}
+
+// GetCreateMetaIssueTypes returns the available issue types for creating issues in a project.
+func (c *Client) GetCreateMetaIssueTypes(ctx context.Context, projectKey string) ([]CreateMetaIssueType, error) {
+	var issueTypes []CreateMetaIssueType
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/issue/createmeta/%s/issuetypes", url.PathEscape(projectKey))
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Values []CreateMetaIssueType `json:"values"`
+		}
+		resp, err := c.j.Do(req, &result)
+		issueTypes = result.Values
+		return resp, err
+	})
+	return issueTypes, err
+}
+
+// GetCreateMetaFields returns the fields (with required flag and allowed values) for a
+// specific project and issue type combination.
+func (c *Client) GetCreateMetaFields(ctx context.Context, projectKey, issueTypeID string) ([]CreateMetaField, error) {
+	var fields []CreateMetaField
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/issue/createmeta/%s/issuetypes/%s",
+			url.PathEscape(projectKey), url.PathEscape(issueTypeID))
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Values []CreateMetaField `json:"values"`
+		}
+		resp, err := c.j.Do(req, &result)
+		fields = result.Values
+		return resp, err
+	})
+	return fields, err
+}
+
 // GetIssue fetches an issue by key.
 func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {
 	var issue *jira.Issue
