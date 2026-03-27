@@ -1,6 +1,6 @@
 # Jira MCP
 
-Give your AI agent full Jira access with just 3 tools.
+Give your AI agent full Jira access with just 4 tools.
 
 Most Jira MCPs dump their entire API surface into the model's context. The agent wastes tokens picking between `jira_get_issue`, `jira_fetch_issue`, `jira_issue_get`... and still gets it wrong.
 
@@ -11,10 +11,17 @@ jira-mcp gives the model exactly what it needs:
 | `jira_read` | Fetch issues by key, search by JQL, list projects/boards/sprints |
 | `jira_write` | Create, update, delete, transition, comment — accepts Markdown, supports `dry_run` |
 | `jira_schema` | Discover fields, transitions, and allowed values |
+| `jira_user_search` | Find users by name or email, get account IDs for assignment |
 
-Three tools that compose naturally: schema to discover, read to find, write to change. Less surface area means fewer wrong picks, fewer redundant calls, more context for your actual work.
+Four tools that compose naturally: schema to discover, read to find, write to change, user search to resolve people. Less surface area means fewer wrong picks, fewer redundant calls, more context for your actual work.
 
 **Your credentials stay on your machine.** jira-mcp runs as a local process over stdio — no server, no proxy, nothing between your agent and Atlassian.
+
+**Smart by default.** jira-mcp hides Jira's complexity so your agent doesn't have to learn it:
+
+- **User search** — `jira_user_search` resolves names and emails to account IDs in one call. No more guessing JQL syntax for assignee lookups.
+- **Required field validation** — before creating an issue, jira-mcp checks the project's required fields and returns missing ones by name with allowed values. Your agent gets it right on the first try instead of decoding opaque `customfield_10104` errors.
+- **Issue type validation** — if the issue type doesn't exist in the target project, the error lists available types immediately.
 
 ## Compared to [mcp-atlassian](https://github.com/sooperset/mcp-atlassian)
 
@@ -23,7 +30,7 @@ mcp-atlassian is a full Atlassian suite — 72 tools, Confluence, OAuth, SSE tra
 jira-mcp does one thing: Jira. And it does it with as little friction as possible.
 
 **Why that matters for your agent:**
-- **3 tools, not 72** — less context burned, sharper focus, fewer hallucinated tool calls
+- **4 tools, not 72** — less context burned, sharper focus, fewer hallucinated tool calls
 - **Zero runtime dependencies** — single Go binary, no Python, no venv, no pip
 - **Works out of the box** — API token auth, stdio transport, ship it
 
@@ -39,7 +46,7 @@ When you give an AI shell access, it can do anything: delete users, change org s
 - **Safety by default** — no shell injection risk, Jira-only blast radius
 - **Native Markdown** — write comments and descriptions in Markdown, it converts automatically
 - **Built-in dry run** — preview every write before it happens
-- **Lean context** — 3 tools vs. the full CLI surface; your agent stays focused
+- **Lean context** — 4 tools vs. the full CLI surface; your agent stays focused
 - **One-line read-only mode** — just instruct the model to use `jira_read` only, no extra tokens needed
 
 Use acli when a human is at the keyboard or when you need Admin/Rovodev operations. Use jira-mcp when an AI agent is driving.
