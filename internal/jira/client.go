@@ -107,10 +107,10 @@ func (c *Client) GetCreateMetaIssueTypes(ctx context.Context, projectKey string)
 			return nil, err
 		}
 		var result struct {
-			Values []CreateMetaIssueType `json:"values"`
+			IssueTypes []CreateMetaIssueType `json:"issueTypes"`
 		}
 		resp, err := c.j.Do(req, &result)
-		issueTypes = result.Values
+		issueTypes = result.IssueTypes
 		return resp, err
 	})
 	return issueTypes, err
