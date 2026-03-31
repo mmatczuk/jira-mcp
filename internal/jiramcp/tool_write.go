@@ -255,24 +255,25 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 		return "", err
 	}
 
-	// Preflight: check required fields via create metadata.
+	// Preflight: advisory check for required fields via create metadata.
+	// Never blocks — hints are appended to the response so the LLM can iterate.
+	var preflightHint string
 	missingMsg, err := h.preflightRequiredFields(ctx, item, payload, cache)
 	if err != nil {
-		// Non-fatal: if metadata fetch fails, proceed and let Jira reject it.
-		missingMsg = ""
-	}
-	if missingMsg != "" {
-		return "", fmt.Errorf("cannot create issue in %s with type %s: %s", item.Project, item.IssueType, missingMsg)
+		// Metadata fetch failed; proceed without hints.
+		preflightHint = ""
+	} else if missingMsg != "" {
+		preflightHint = fmt.Sprintf("\nPreflight warning: %s", missingMsg)
 	}
 
 	if dryRun {
 		data, _ := json.MarshalIndent(payload, "", "  ")
-		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s", item.Project, item.IssueType, string(data)), nil
+		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s%s", item.Project, item.IssueType, string(data), preflightHint), nil
 	}
 
 	key, _, err := h.client.CreateIssueV3(ctx, payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to create issue in %s: %w; %s", item.Project, err, createErrorHints(err))
+		return "", fmt.Errorf("failed to create issue in %s: %w; %s%s", item.Project, err, createErrorHints(err), preflightHint)
 	}
 
 	return fmt.Sprintf("Created %s — %s (project=%s, type=%s). Hint: Use jira_read keys=[\"%s\"] to see the full issue.", key, item.Summary, item.Project, item.IssueType, key), nil

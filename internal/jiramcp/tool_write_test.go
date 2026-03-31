@@ -855,6 +855,7 @@ func TestWriteCreate_DescriptionConvertsToADF(t *testing.T) {
 // --- preflight required fields ---
 
 func TestWriteCreate_PreflightMissingRequiredFields(t *testing.T) {
+	var createCalled bool
 	mc := &mockClient{
 		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
 			return []jira.CreateMetaIssueType{{ID: "10", Name: "Bug"}}, nil
@@ -870,13 +871,20 @@ func TestWriteCreate_PreflightMissingRequiredFields(t *testing.T) {
 				{FieldID: "customfield_10101", Name: "Redpanda Version", Required: true},
 			}, nil
 		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			createCalled = true
+			return "", "", fmt.Errorf("request failed. Status code: 400: customfield_10104 is required")
+		},
 	}
 	h := newWriteHandlers(mc)
 	text, _ := callWrite(t, h, WriteArgs{
 		Action: "create",
 		Items:  []WriteItem{{Project: "CON", Summary: "test", IssueType: "Bug"}},
 	})
+	// Request is sent to Jira despite missing fields; preflight warning is appended.
+	assert.True(t, createCalled, "create request should be sent to Jira")
 	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "Preflight warning")
 	assert.Contains(t, text, "missing required fields")
 	assert.Contains(t, text, "Kubernetes Environment")
 	assert.Contains(t, text, "customfield_10104")
@@ -915,6 +923,7 @@ func TestWriteCreate_PreflightPassesWithFieldsJSON(t *testing.T) {
 }
 
 func TestWriteCreate_PreflightInvalidIssueType(t *testing.T) {
+	var createCalled bool
 	mc := &mockClient{
 		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
 			return []jira.CreateMetaIssueType{
@@ -922,13 +931,20 @@ func TestWriteCreate_PreflightInvalidIssueType(t *testing.T) {
 				{ID: "2", Name: "Story"},
 			}, nil
 		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			createCalled = true
+			return "", "", fmt.Errorf("request failed. Status code: 400: valid issue type is required")
+		},
 	}
 	h := newWriteHandlers(mc)
 	text, _ := callWrite(t, h, WriteArgs{
 		Action: "create",
 		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Bug"}},
 	})
+	// Request is sent to Jira; preflight warning about invalid type is appended.
+	assert.True(t, createCalled, "create request should be sent to Jira")
 	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "Preflight warning")
 	assert.Contains(t, text, "issue type \"Bug\" not found")
 	assert.Contains(t, text, "Task")
 	assert.Contains(t, text, "Story")
@@ -973,4 +989,48 @@ func TestWriteCreate_PreflightMetaFetchFailsGracefully(t *testing.T) {
 	})
 	// Should proceed despite metadata failure and succeed at API level.
 	assert.Contains(t, text, "Created P-1")
+}
+
+func TestWriteCreate_PreflightWarningButJiraSucceeds(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			// Stale metadata — type exists in Jira but not in createmeta response.
+			return []jira.CreateMetaIssueType{{ID: "1", Name: "Task"}}, nil
+		},
+		CreateIssueV3Fn: func(context.Context, map[string]any) (string, string, error) {
+			return "P-1", "1", nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Epic"}},
+	})
+	// Jira accepted the request despite preflight warning — success takes priority.
+	assert.Contains(t, text, "Created P-1")
+	assert.NotContains(t, text, "ERROR")
+}
+
+func TestWriteCreate_PreflightWarningInDryRun(t *testing.T) {
+	mc := &mockClient{
+		GetCreateMetaIssueTypesFn: func(_ context.Context, _ string) ([]jira.CreateMetaIssueType, error) {
+			return []jira.CreateMetaIssueType{{ID: "10", Name: "Bug"}}, nil
+		},
+		GetCreateMetaFieldsFn: func(_ context.Context, _, _ string) ([]jira.CreateMetaField, error) {
+			return []jira.CreateMetaField{
+				{FieldID: "summary", Name: "Summary", Required: true},
+				{FieldID: "customfield_10101", Name: "Redpanda Version", Required: true},
+			}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		DryRun: true,
+		Items:  []WriteItem{{Project: "P", Summary: "s", IssueType: "Bug"}},
+	})
+	// Dry run should show payload AND preflight warning.
+	assert.Contains(t, text, "Would create issue")
+	assert.Contains(t, text, "Preflight warning")
+	assert.Contains(t, text, "Redpanda Version")
 }
