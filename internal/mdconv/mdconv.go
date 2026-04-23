@@ -195,11 +195,18 @@ func convertInline(n ast.Node, source []byte) []any {
 		}
 		children := convertInlineChildren(n, source)
 		for _, child := range children {
-			if m, ok := child.(node); ok {
-				marks, _ := m["marks"].([]any)
-				marks = append(marks, node{"type": markType})
-				m["marks"] = marks
+			m, ok := child.(node)
+			if !ok {
+				continue
 			}
+			marks, _ := m["marks"].([]any)
+			// ADF forbids combining the code mark with em/strong.
+			// See https://developer.atlassian.com/cloud/jira/platform/apis/document/marks/code/
+			if hasCodeMark(marks) {
+				continue
+			}
+			marks = append(marks, node{"type": markType})
+			m["marks"] = marks
 		}
 		return children
 
@@ -248,6 +255,18 @@ func convertInline(n ast.Node, source []byte) []any {
 	default:
 		return convertInlineChildren(n, source)
 	}
+}
+
+// hasCodeMark reports whether marks already contains a mark of type "code".
+func hasCodeMark(marks []any) bool {
+	for _, mark := range marks {
+		if m, ok := mark.(node); ok {
+			if t, _ := m["type"].(string); t == "code" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractText concatenates all text segments from child Text nodes.

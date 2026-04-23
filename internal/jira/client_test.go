@@ -219,6 +219,23 @@ func TestRetry_ContextCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestRetry_EnrichesErrorWithFieldDetails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errorMessages":["something went wrong"],"errors":{"description":"INVALID_INPUT"}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, _, err := c.CreateIssueV3(context.Background(), map[string]any{
+		"fields": map[string]any{"summary": "test"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "something went wrong")
+	assert.Contains(t, err.Error(), "description: INVALID_INPUT")
+}
+
 func TestRetry_DoesNotRetry500(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -281,6 +281,110 @@ func TestToADF_NestedList(t *testing.T) {
 	assert.True(t, found, "expected nested bulletList inside first list item")
 }
 
+func TestToADF_CodeInsideBold_DropsBoldMark(t *testing.T) {
+	result := ToADF("**`foo`**")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 1)
+
+	text := inlines[0].(node)
+	assert.Equal(t, "foo", text["text"])
+
+	marks := text["marks"].([]any)
+	require.Len(t, marks, 1)
+	assert.Equal(t, "code", marks[0].(node)["type"])
+
+	for _, mark := range marks {
+		assert.NotEqual(t, "strong", mark.(node)["type"], "strong mark must not be combined with code")
+	}
+}
+
+func TestToADF_CodeInsideEm_DropsEmMark(t *testing.T) {
+	result := ToADF("*`foo`*")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 1)
+
+	text := inlines[0].(node)
+	assert.Equal(t, "foo", text["text"])
+
+	marks := text["marks"].([]any)
+	require.Len(t, marks, 1)
+	assert.Equal(t, "code", marks[0].(node)["type"])
+
+	for _, mark := range marks {
+		assert.NotEqual(t, "em", mark.(node)["type"], "em mark must not be combined with code")
+	}
+}
+
+func TestToADF_CodeInsideLink_KeepsBothMarks(t *testing.T) {
+	result := ToADF("[`click`](https://example.com)")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 1)
+
+	text := inlines[0].(node)
+	assert.Equal(t, "click", text["text"])
+
+	marks := text["marks"].([]any)
+	require.Len(t, marks, 2)
+
+	types := map[string]bool{}
+	for _, mark := range marks {
+		types[mark.(node)["type"].(string)] = true
+	}
+	assert.True(t, types["code"], "expected code mark")
+	assert.True(t, types["link"], "expected link mark")
+}
+
+func TestToADF_MixedEmphasisChildren(t *testing.T) {
+	result := ToADF("**plain and `code`**")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 2)
+
+	plain := inlines[0].(node)
+	assert.Equal(t, "plain and ", plain["text"])
+	plainMarks := plain["marks"].([]any)
+	require.Len(t, plainMarks, 1)
+	assert.Equal(t, "strong", plainMarks[0].(node)["type"])
+
+	code := inlines[1].(node)
+	assert.Equal(t, "code", code["text"])
+	codeMarks := code["marks"].([]any)
+	require.Len(t, codeMarks, 1)
+	assert.Equal(t, "code", codeMarks[0].(node)["type"])
+}
+
+func TestToADF_NestedBoldItalicCode(t *testing.T) {
+	result := ToADF("***`foo`***")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 1)
+
+	text := inlines[0].(node)
+	assert.Equal(t, "foo", text["text"])
+
+	marks := text["marks"].([]any)
+	require.Len(t, marks, 1)
+	assert.Equal(t, "code", marks[0].(node)["type"])
+}
+
 func TestToADF_ThematicBreak(t *testing.T) {
 	result := ToADF("above\n\n---\n\nbelow")
 	require.NotNil(t, result)
