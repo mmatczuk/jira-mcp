@@ -63,8 +63,8 @@ All actions support dry_run=true to preview without executing. Descriptions and 
 // createMetaCache caches create-metadata API responses within a single
 // handleWrite call to avoid redundant requests for batch creates.
 type createMetaCache struct {
-	issueTypes map[string][]jira.CreateMetaIssueType        // project → issue types
-	fields     map[string]map[string][]jira.CreateMetaField // project → issueTypeID → fields
+	issueTypes map[string][]jira.CreateMetaIssueType            // project → issue types
+	fields     map[string]map[string][]jira.CreateMetaField     // project → issueTypeID → fields
 }
 
 func newCreateMetaCache() *createMetaCache {
