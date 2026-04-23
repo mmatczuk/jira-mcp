@@ -270,6 +270,104 @@ func TestRetry_RetriesOn503(t *testing.T) {
 	assert.Equal(t, 2, calls)
 }
 
+// --- v2 (wiki-markup) endpoints ---
+
+func TestCreateIssueV2_HappyPath(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "10001", "key": "PROJ-7"})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	key, id, err := c.CreateIssueV2(context.Background(), map[string]any{
+		"fields": map[string]any{"summary": "s", "description": "*wiki*"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "PROJ-7", key)
+	assert.Equal(t, "10001", id)
+	assert.Equal(t, "/rest/api/2/issue", gotPath)
+	assert.Equal(t, "POST", gotMethod)
+
+	fields := gotBody["fields"].(map[string]any)
+	assert.Equal(t, "*wiki*", fields["description"])
+}
+
+func TestUpdateIssueV2_HappyPath(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.UpdateIssueV2(context.Background(), "PROJ-1", map[string]any{
+		"fields": map[string]any{"description": "h1. wiki"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/2/issue/PROJ-1", gotPath)
+	assert.Equal(t, "PUT", gotMethod)
+}
+
+func TestUpdateIssueV2_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.UpdateIssueV2(context.Background(), "MISSING-1", map[string]any{})
+	require.Error(t, err)
+}
+
+func TestAddCommentV2_HappyPath(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "555"})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	id, err := c.AddCommentV2(context.Background(), "PROJ-1", "{code}wiki{code}")
+	require.NoError(t, err)
+	assert.Equal(t, "555", id)
+	assert.Equal(t, "/rest/api/2/issue/PROJ-1/comment", gotPath)
+	assert.Equal(t, "POST", gotMethod)
+	assert.Equal(t, "{code}wiki{code}", gotBody["body"])
+}
+
+func TestUpdateCommentV2_HappyPath(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "99"})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.UpdateCommentV2(context.Background(), "PROJ-1", "99", "h2. edited")
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/2/issue/PROJ-1/comment/99", gotPath)
+	assert.Equal(t, "PUT", gotMethod)
+	assert.Equal(t, "h2. edited", gotBody["body"])
+}
+
 // --- GetFieldOptions multi-context ---
 
 func TestGetFieldOptions_MultipleContexts(t *testing.T) {

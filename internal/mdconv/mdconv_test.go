@@ -385,6 +385,46 @@ func TestToADF_NestedBoldItalicCode(t *testing.T) {
 	assert.Equal(t, "code", marks[0].(node)["type"])
 }
 
+// TestToADF_WikiMarkupCurrentlyPassesThroughAsText pins the converter's
+// behaviour today: wiki-markup input is parsed as plain-text Markdown and the
+// original tokens survive verbatim in the ADF output. Detection of wiki-markup
+// happens at the handler boundary (see internal/jiramcp), not inside ToADF.
+// This test is a sanity check that the converter itself is not modified to
+// silently strip or rewrite wiki-markup.
+func TestToADF_WikiMarkupCurrentlyPassesThroughAsText(t *testing.T) {
+	result := ToADF("{code:sql}select 1{code}")
+	require.NotNil(t, result)
+
+	rendered := collectText(result)
+	assert.Contains(t, rendered, "{code:sql}")
+}
+
+// collectText walks the ADF doc and concatenates all text node values.
+func collectText(n any) string {
+	switch v := n.(type) {
+	case node:
+		if t, ok := v["type"].(string); ok && t == "text" {
+			if s, ok := v["text"].(string); ok {
+				return s
+			}
+		}
+		if c, ok := v["content"].([]any); ok {
+			var out string
+			for _, child := range c {
+				out += collectText(child)
+			}
+			return out
+		}
+	case []any:
+		var out string
+		for _, child := range v {
+			out += collectText(child)
+		}
+		return out
+	}
+	return ""
+}
+
 func TestToADF_ThematicBreak(t *testing.T) {
 	result := ToADF("above\n\n---\n\nbelow")
 	require.NotNil(t, result)

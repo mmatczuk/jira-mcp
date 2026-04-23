@@ -26,8 +26,9 @@ func TestBuildIssuePayload_AllFields(t *testing.T) {
 		Description: "Hello **world**",
 	}
 
-	payload, err := buildIssuePayload(item)
+	payload, useV2, err := buildIssuePayload(item)
 	require.NoError(t, err)
+	assert.False(t, useV2, "default format must target v3")
 
 	fields := payload["fields"].(map[string]any)
 	assert.Equal(t, map[string]any{"key": "PROJ"}, fields["project"])
@@ -44,8 +45,9 @@ func TestBuildIssuePayload_AllFields(t *testing.T) {
 }
 
 func TestBuildIssuePayload_EmptyItem(t *testing.T) {
-	payload, err := buildIssuePayload(WriteItem{})
+	payload, useV2, err := buildIssuePayload(WriteItem{})
 	require.NoError(t, err)
+	assert.False(t, useV2)
 
 	fields := payload["fields"].(map[string]any)
 	assert.Empty(t, fields)
@@ -57,7 +59,7 @@ func TestBuildIssuePayload_FieldsJSON_Valid(t *testing.T) {
 		FieldsJSON: `{"customfield_10001": "hello", "customfield_10002": 42}`,
 	}
 
-	payload, err := buildIssuePayload(item)
+	payload, _, err := buildIssuePayload(item)
 	require.NoError(t, err)
 
 	fields := payload["fields"].(map[string]any)
@@ -69,7 +71,7 @@ func TestBuildIssuePayload_FieldsJSON_Valid(t *testing.T) {
 func TestBuildIssuePayload_FieldsJSON_Invalid(t *testing.T) {
 	item := WriteItem{FieldsJSON: "not json"}
 
-	_, err := buildIssuePayload(item)
+	_, _, err := buildIssuePayload(item)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid fields_json")
 }
@@ -80,7 +82,7 @@ func TestBuildIssuePayload_FieldsJSON_OverridesStandard(t *testing.T) {
 		FieldsJSON: `{"summary": "overridden"}`,
 	}
 
-	payload, err := buildIssuePayload(item)
+	payload, _, err := buildIssuePayload(item)
 	require.NoError(t, err)
 
 	fields := payload["fields"].(map[string]any)
@@ -90,7 +92,9 @@ func TestBuildIssuePayload_FieldsJSON_OverridesStandard(t *testing.T) {
 // --- buildCommentBody ---
 
 func TestBuildCommentBody_Markdown(t *testing.T) {
-	body := buildCommentBody("Hello **world**")
+	body, useV2, err := buildCommentBody("Hello **world**", "")
+	require.NoError(t, err)
+	assert.False(t, useV2)
 	m, ok := body.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, 1, m["version"])
@@ -98,13 +102,22 @@ func TestBuildCommentBody_Markdown(t *testing.T) {
 }
 
 func TestBuildCommentBody_EmptyFallback(t *testing.T) {
-	body := buildCommentBody("")
+	body, useV2, err := buildCommentBody("", "")
+	require.NoError(t, err)
+	assert.False(t, useV2)
 	m, ok := body.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "doc", m["type"])
 	content := m["content"].([]any)
 	para := content[0].(map[string]any)
 	assert.Equal(t, "paragraph", para["type"])
+}
+
+func TestBuildCommentBody_Wiki(t *testing.T) {
+	body, useV2, err := buildCommentBody("{code}x{code}", "wiki")
+	require.NoError(t, err)
+	assert.True(t, useV2)
+	assert.Equal(t, "{code}x{code}", body)
 }
 
 // --- handleWrite dispatch & validation ---
@@ -814,6 +827,250 @@ func TestHandleWrite_DryRunLabel(t *testing.T) {
 		Items:  []WriteItem{{Key: "X-1"}},
 	})
 	assert.Contains(t, text, "DRY RUN")
+}
+
+// --- description/comment format opt-in ---
+
+func TestHandleWrite_DescriptionFormat_Markdown(t *testing.T) {
+	// Default (empty) format and explicit "markdown" must both produce ADF
+	// and call the v3 endpoint, preserving existing behaviour.
+	for _, format := range []string{"", "markdown"} {
+		t.Run("format="+format, func(t *testing.T) {
+			var payloadSeen map[string]any
+			mc := &mockClient{
+				UpdateIssueV3Fn: func(_ context.Context, key string, payload map[string]any) error {
+					assert.Equal(t, "PROJ-1", key)
+					payloadSeen = payload
+					return nil
+				},
+			}
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: "update",
+				Items: []WriteItem{{
+					Key:               "PROJ-1",
+					Description:       "Hello **world**",
+					DescriptionFormat: format,
+				}},
+			})
+			assert.Contains(t, text, "Updated PROJ-1")
+
+			fields := payloadSeen["fields"].(map[string]any)
+			desc, ok := fields["description"].(map[string]any)
+			require.True(t, ok, "description should be ADF map for markdown")
+			assert.Equal(t, "doc", desc["type"])
+		})
+	}
+}
+
+func TestHandleWrite_DescriptionFormat_Wiki(t *testing.T) {
+	var wikiPayload map[string]any
+	mc := &mockClient{
+		UpdateIssueV2Fn: func(_ context.Context, key string, payload map[string]any) error {
+			assert.Equal(t, "PROJ-1", key)
+			wikiPayload = payload
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:               "PROJ-1",
+			Description:       "{code:sql}select 1{code}",
+			DescriptionFormat: "wiki",
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+
+	fields := wikiPayload["fields"].(map[string]any)
+	// Wiki path must send the raw string, not an ADF map, to the v2 endpoint.
+	assert.Equal(t, "{code:sql}select 1{code}", fields["description"])
+}
+
+func TestHandleWrite_CreateDescriptionFormat_Wiki(t *testing.T) {
+	var wikiPayload map[string]any
+	mc := &mockClient{
+		CreateIssueV2Fn: func(_ context.Context, payload map[string]any) (string, string, error) {
+			wikiPayload = payload
+			return "PROJ-42", "42", nil
+		},
+	}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project:           "PROJ",
+			Summary:           "wiki create",
+			IssueType:         "Task",
+			Description:       "*bold* and h1. heading",
+			DescriptionFormat: "wiki",
+		}},
+	})
+	assert.Contains(t, text, "Created PROJ-42")
+
+	fields := wikiPayload["fields"].(map[string]any)
+	assert.Equal(t, "*bold* and h1. heading", fields["description"])
+}
+
+func TestHandleWrite_CommentFormat_Wiki(t *testing.T) {
+	var capturedBody any
+	mc := &mockClient{
+		AddCommentV2Fn: func(_ context.Context, key string, body string) (string, error) {
+			assert.Equal(t, "PROJ-1", key)
+			capturedBody = body
+			return "900", nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "comment",
+		Items: []WriteItem{{
+			Key:           "PROJ-1",
+			Comment:       "{quote}hello{quote}",
+			CommentFormat: "wiki",
+		}},
+	})
+	assert.Contains(t, text, "Added comment to PROJ-1")
+	assert.Contains(t, text, "comment_id=900")
+	assert.Equal(t, "{quote}hello{quote}", capturedBody)
+}
+
+func TestHandleWrite_EditCommentFormat_Wiki(t *testing.T) {
+	var capturedBody string
+	mc := &mockClient{
+		UpdateCommentV2Fn: func(_ context.Context, key, cid, body string) error {
+			assert.Equal(t, "PROJ-1", key)
+			assert.Equal(t, "55", cid)
+			capturedBody = body
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "edit_comment",
+		Items: []WriteItem{{
+			Key:           "PROJ-1",
+			CommentID:     "55",
+			Comment:       "h2. edited",
+			CommentFormat: "wiki",
+		}},
+	})
+	assert.Contains(t, text, "Updated comment 55 on PROJ-1")
+	assert.Equal(t, "h2. edited", capturedBody)
+}
+
+func TestHandleWrite_DescriptionFormat_Unknown(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:               "PROJ-1",
+			Description:       "anything",
+			DescriptionFormat: "bogus",
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "description_format")
+	assert.Contains(t, text, "bogus")
+	assert.Contains(t, text, "markdown")
+	assert.Contains(t, text, "wiki")
+}
+
+func TestHandleWrite_CommentFormat_Unknown(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "comment",
+		Items: []WriteItem{{
+			Key:           "PROJ-1",
+			Comment:       "anything",
+			CommentFormat: "bogus",
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "comment_format")
+	assert.Contains(t, text, "bogus")
+	assert.Contains(t, text, "markdown")
+	assert.Contains(t, text, "wiki")
+}
+
+// --- wiki-markup rejection ---
+
+// TestHandleWrite_DescriptionWithWikiMarkupIsRejected is the Phase 0 red test
+// for the wiki-markup passthrough bug: today, wiki-markup in a description
+// silently converts to a plain-text ADF doc that Jira renders as literal
+// tokens. After the fix, default markdown writes must reject wiki-markup input
+// with an actionable error naming the offending tokens and suggesting
+// description_format="wiki" as the opt-out.
+func TestHandleWrite_DescriptionWithWikiMarkupIsRejected(t *testing.T) {
+	mc := &mockClient{
+		// UpdateIssueV3Fn intentionally left unset — the handler must NOT reach
+		// the wire. If it does, the mock panics with a clear message.
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:         "PROJ-1",
+			Description: "{code:sql}select 1{code}\n\n{{inline}}\n\nh1. Heading",
+		}},
+	})
+
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "wiki-markup")
+	assert.Contains(t, text, "{code:sql}")
+	assert.Contains(t, text, "{{inline}}")
+	assert.Contains(t, text, "h1.")
+	assert.Contains(t, text, `description_format="wiki"`)
+}
+
+// TestHandleWrite_AllowsWikiMarkupWhenFormatWiki verifies the opt-out works:
+// the same wiki-markup input that is rejected on the default markdown path
+// must succeed when DescriptionFormat="wiki", routing through the v2 endpoint
+// with the raw string.
+func TestHandleWrite_AllowsWikiMarkupWhenFormatWiki(t *testing.T) {
+	var gotPayload map[string]any
+	mc := &mockClient{
+		UpdateIssueV2Fn: func(_ context.Context, key string, payload map[string]any) error {
+			assert.Equal(t, "PROJ-1", key)
+			gotPayload = payload
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:               "PROJ-1",
+			Description:       "{code:sql}select 1{code}\n\n{{inline}}\n\nh1. Heading",
+			DescriptionFormat: "wiki",
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+
+	fields := gotPayload["fields"].(map[string]any)
+	assert.Equal(t, "{code:sql}select 1{code}\n\n{{inline}}\n\nh1. Heading", fields["description"])
+}
+
+// TestHandleWrite_CommentRejectsWikiMarkupOnDefault mirrors the description
+// rejection for the comment path.
+func TestHandleWrite_CommentRejectsWikiMarkupOnDefault(t *testing.T) {
+	mc := &mockClient{}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "comment",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Comment: "{quote}wiki{quote}",
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "wiki-markup")
+	assert.Contains(t, text, "{quote}")
+	assert.Contains(t, text, `comment_format="wiki"`)
 }
 
 // --- description ADF in payload ---

@@ -17,10 +17,14 @@ type JiraClient interface {
 	SearchIssues(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
 	CreateIssueV3(ctx context.Context, payload map[string]any) (string, string, error)
 	UpdateIssueV3(ctx context.Context, key string, payload map[string]any) error
+	CreateIssueV2(ctx context.Context, payload map[string]any) (string, string, error)
+	UpdateIssueV2(ctx context.Context, key string, payload map[string]any) error
 	DeleteIssue(ctx context.Context, key string) error
 	DoTransition(ctx context.Context, key, transitionID string) error
 	AddComment(ctx context.Context, key string, body any) (string, error)
 	UpdateComment(ctx context.Context, key, commentID string, body any) error
+	AddCommentV2(ctx context.Context, key, body string) (string, error)
+	UpdateCommentV2(ctx context.Context, key, commentID, body string) error
 	GetAllBoards(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
 	GetAllSprints(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
 	GetSprintIssues(ctx context.Context, sprintID int) ([]jira.Issue, error)

@@ -19,10 +19,14 @@ type mockClient struct {
 	SearchIssuesFn            func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
 	CreateIssueV3Fn           func(ctx context.Context, payload map[string]any) (string, string, error)
 	UpdateIssueV3Fn           func(ctx context.Context, key string, payload map[string]any) error
+	CreateIssueV2Fn           func(ctx context.Context, payload map[string]any) (string, string, error)
+	UpdateIssueV2Fn           func(ctx context.Context, key string, payload map[string]any) error
 	DeleteIssueFn             func(ctx context.Context, key string) error
 	DoTransitionFn            func(ctx context.Context, key, transitionID string) error
 	AddCommentFn              func(ctx context.Context, key string, body any) (string, error)
 	UpdateCommentFn           func(ctx context.Context, key, commentID string, body any) error
+	AddCommentV2Fn            func(ctx context.Context, key, body string) (string, error)
+	UpdateCommentV2Fn         func(ctx context.Context, key, commentID, body string) error
 	GetAllBoardsFn            func(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
 	GetAllSprintsFn           func(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
 	GetSprintIssuesFn         func(ctx context.Context, sprintID int) ([]jira.Issue, error)
@@ -87,6 +91,34 @@ func (m *mockClient) UpdateIssueV3(ctx context.Context, key string, payload map[
 		panic(fmt.Sprintf("mockClient.UpdateIssueV3 called but UpdateIssueV3Fn not set (key=%s)", key))
 	}
 	return m.UpdateIssueV3Fn(ctx, key, payload)
+}
+
+func (m *mockClient) CreateIssueV2(ctx context.Context, payload map[string]any) (string, string, error) {
+	if m.CreateIssueV2Fn == nil {
+		panic("mockClient.CreateIssueV2 called but CreateIssueV2Fn not set")
+	}
+	return m.CreateIssueV2Fn(ctx, payload)
+}
+
+func (m *mockClient) UpdateIssueV2(ctx context.Context, key string, payload map[string]any) error {
+	if m.UpdateIssueV2Fn == nil {
+		panic(fmt.Sprintf("mockClient.UpdateIssueV2 called but UpdateIssueV2Fn not set (key=%s)", key))
+	}
+	return m.UpdateIssueV2Fn(ctx, key, payload)
+}
+
+func (m *mockClient) AddCommentV2(ctx context.Context, key, body string) (string, error) {
+	if m.AddCommentV2Fn == nil {
+		panic(fmt.Sprintf("mockClient.AddCommentV2 called but AddCommentV2Fn not set (key=%s)", key))
+	}
+	return m.AddCommentV2Fn(ctx, key, body)
+}
+
+func (m *mockClient) UpdateCommentV2(ctx context.Context, key, commentID, body string) error {
+	if m.UpdateCommentV2Fn == nil {
+		panic(fmt.Sprintf("mockClient.UpdateCommentV2 called but UpdateCommentV2Fn not set (key=%s, commentID=%s)", key, commentID))
+	}
+	return m.UpdateCommentV2Fn(ctx, key, commentID, body)
 }
 
 func (m *mockClient) DeleteIssue(ctx context.Context, key string) error {

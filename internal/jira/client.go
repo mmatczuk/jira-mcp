@@ -376,6 +376,76 @@ func (c *Client) UpdateIssueV3(ctx context.Context, key string, payload map[stri
 	})
 }
 
+// CreateIssueV2 creates an issue using REST API v2 with a raw JSON payload.
+// The v2 API accepts `description` and comment bodies as legacy wiki-markup
+// strings (v3 requires ADF). Use only when the caller explicitly opts in.
+func (c *Client) CreateIssueV2(ctx context.Context, payload map[string]any) (string, string, error) {
+	var key, id string
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		req, err := c.j.NewRequestWithContext(ctx, "POST", "rest/api/2/issue", payload)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			ID  string `json:"id"`
+			Key string `json:"key"`
+		}
+		resp, err := c.j.Do(req, &result)
+		key = result.Key
+		id = result.ID
+		return resp, err
+	})
+	return key, id, err
+}
+
+// UpdateIssueV2 updates an issue using REST API v2. See CreateIssueV2 for the
+// rationale behind exposing the legacy endpoint.
+func (c *Client) UpdateIssueV2(ctx context.Context, key string, payload map[string]any) error {
+	return c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/2/issue/%s", key)
+		req, err := c.j.NewRequestWithContext(ctx, "PUT", path, payload)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, nil)
+		return resp, err
+	})
+}
+
+// AddCommentV2 adds a comment using REST API v2 (wiki-markup string body).
+func (c *Client) AddCommentV2(ctx context.Context, key, body string) (string, error) {
+	var commentID string
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/2/issue/%s/comment", key)
+		payload := map[string]any{"body": body}
+		req, err := c.j.NewRequestWithContext(ctx, "POST", path, payload)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			ID string `json:"id"`
+		}
+		resp, err := c.j.Do(req, &result)
+		commentID = result.ID
+		return resp, err
+	})
+	return commentID, err
+}
+
+// UpdateCommentV2 updates a comment using REST API v2 (wiki-markup string body).
+func (c *Client) UpdateCommentV2(ctx context.Context, key, commentID, body string) error {
+	return c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/2/issue/%s/comment/%s", key, commentID)
+		payload := map[string]any{"body": body}
+		req, err := c.j.NewRequestWithContext(ctx, "PUT", path, payload)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, nil)
+		return resp, err
+	})
+}
+
 // GetFieldOptions returns options for a custom field, aggregated across all contexts.
 func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.RawMessage, error) {
 	// Fetch all contexts for the field.
