@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/andygrunwald/go-jira v1.17.0
+	github.com/google/jsonschema-go v0.4.2
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/stretchr/testify v1.11.1
 	github.com/yuin/goldmark v1.7.16
@@ -14,7 +15,6 @@ require (
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,9 +27,9 @@ func TestBuildIssuePayload_AllFields(t *testing.T) {
 		Description: "Hello **world**",
 	}
 
-	payload, useV2, err := buildIssuePayload(item)
+	payload, format, err := buildIssuePayload(item)
 	require.NoError(t, err)
-	assert.False(t, useV2, "default format must target v3")
+	assert.Equal(t, formatMarkdown, format, "default format must target v3")
 
 	fields := payload["fields"].(map[string]any)
 	assert.Equal(t, map[string]any{"key": "PROJ"}, fields["project"])
@@ -45,9 +46,9 @@ func TestBuildIssuePayload_AllFields(t *testing.T) {
 }
 
 func TestBuildIssuePayload_EmptyItem(t *testing.T) {
-	payload, useV2, err := buildIssuePayload(WriteItem{})
+	payload, format, err := buildIssuePayload(WriteItem{})
 	require.NoError(t, err)
-	assert.False(t, useV2)
+	assert.Equal(t, formatMarkdown, format)
 
 	fields := payload["fields"].(map[string]any)
 	assert.Empty(t, fields)
@@ -92,9 +93,9 @@ func TestBuildIssuePayload_FieldsJSON_OverridesStandard(t *testing.T) {
 // --- buildCommentBody ---
 
 func TestBuildCommentBody_Markdown(t *testing.T) {
-	body, useV2, err := buildCommentBody("Hello **world**", "")
+	body, format, err := buildCommentBody("Hello **world**", "")
 	require.NoError(t, err)
-	assert.False(t, useV2)
+	assert.Equal(t, formatMarkdown, format)
 	m, ok := body.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, 1, m["version"])
@@ -102,9 +103,9 @@ func TestBuildCommentBody_Markdown(t *testing.T) {
 }
 
 func TestBuildCommentBody_EmptyFallback(t *testing.T) {
-	body, useV2, err := buildCommentBody("", "")
+	body, format, err := buildCommentBody("", "")
 	require.NoError(t, err)
-	assert.False(t, useV2)
+	assert.Equal(t, formatMarkdown, format)
 	m, ok := body.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "doc", m["type"])
@@ -114,10 +115,32 @@ func TestBuildCommentBody_EmptyFallback(t *testing.T) {
 }
 
 func TestBuildCommentBody_Wiki(t *testing.T) {
-	body, useV2, err := buildCommentBody("{code}x{code}", "wiki")
+	body, format, err := buildCommentBody("{code}x{code}", "wiki")
 	require.NoError(t, err)
-	assert.True(t, useV2)
+	assert.Equal(t, formatWiki, format)
 	assert.Equal(t, "{code}x{code}", body)
+}
+
+// --- writeTool input schema ---
+
+// TestWriteTool_FormatEnums guards the schema patch in
+// mustBuildWriteInputSchema: description_format and comment_format must
+// surface the markdown/wiki enum so MCP clients can reject invalid values
+// before a request is dispatched.
+func TestWriteTool_FormatEnums(t *testing.T) {
+	schema, ok := writeTool.InputSchema.(*jsonschema.Schema)
+	require.True(t, ok, "writeTool.InputSchema must be a *jsonschema.Schema")
+
+	itemSchema := schema.Properties["items"].Items
+	require.NotNil(t, itemSchema)
+
+	for _, field := range []string{"description_format", "comment_format"} {
+		t.Run(field, func(t *testing.T) {
+			prop := itemSchema.Properties[field]
+			require.NotNil(t, prop, "missing property")
+			assert.Equal(t, []any{formatMarkdown, formatWiki}, prop.Enum)
+		})
+	}
 }
 
 // --- handleWrite dispatch & validation ---
