@@ -425,6 +425,113 @@ func collectText(n any) string {
 	return ""
 }
 
+// firstTextOfCell asserts the cell shape (type + single paragraph) and returns
+// the cell's first inline text node so callers can check text and marks.
+func firstTextOfCell(t *testing.T, cell any, wantCellType string) node {
+	t.Helper()
+	c := cell.(node)
+	assert.Equal(t, wantCellType, c["type"])
+	para := c["content"].([]any)[0].(node)
+	assert.Equal(t, "paragraph", para["type"])
+	return para["content"].([]any)[0].(node)
+}
+
+// rowCells asserts the row is a tableRow and returns its cells.
+func rowCells(t *testing.T, row any) []any {
+	t.Helper()
+	r := row.(node)
+	assert.Equal(t, "tableRow", r["type"])
+	return r["content"].([]any)
+}
+
+func TestToADF_PipeTable(t *testing.T) {
+	md := "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n"
+	result := ToADF(md)
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	require.Len(t, content, 1)
+
+	table := content[0].(node)
+	assert.Equal(t, "table", table["type"])
+
+	rows := table["content"].([]any)
+	require.Len(t, rows, 3, "header row plus two body rows; alignment row is consumed")
+
+	expected := []struct {
+		cellType string
+		texts    []string
+	}{
+		{"tableHeader", []string{"a", "b"}},
+		{"tableCell", []string{"1", "2"}},
+		{"tableCell", []string{"3", "4"}},
+	}
+	for i, want := range expected {
+		cells := rowCells(t, rows[i])
+		require.Len(t, cells, len(want.texts))
+		for j, wantText := range want.texts {
+			text := firstTextOfCell(t, cells[j], want.cellType)
+			assert.Equal(t, wantText, text["text"])
+		}
+	}
+}
+
+func TestToADF_PipeTable_InlineFormattingInCells(t *testing.T) {
+	md := "| name | code |\n|---|---|\n| **bold** | `fmt.Println` |\n| [link](https://example.com) | plain |\n"
+	result := ToADF(md)
+	require.NotNil(t, result)
+
+	table := result["content"].([]any)[0].(node)
+	rows := table["content"].([]any)
+	require.Len(t, rows, 3)
+
+	row1Cells := rowCells(t, rows[1])
+	bold := firstTextOfCell(t, row1Cells[0], "tableCell")
+	assert.Equal(t, "bold", bold["text"])
+	boldMarks := bold["marks"].([]any)
+	require.Len(t, boldMarks, 1)
+	assert.Equal(t, "strong", boldMarks[0].(node)["type"])
+
+	code := firstTextOfCell(t, row1Cells[1], "tableCell")
+	assert.Equal(t, "fmt.Println", code["text"])
+	codeMarks := code["marks"].([]any)
+	require.Len(t, codeMarks, 1)
+	assert.Equal(t, "code", codeMarks[0].(node)["type"])
+
+	row2Cells := rowCells(t, rows[2])
+	link := firstTextOfCell(t, row2Cells[0], "tableCell")
+	assert.Equal(t, "link", link["text"])
+	linkMarks := link["marks"].([]any)
+	require.Len(t, linkMarks, 1)
+	linkMark := linkMarks[0].(node)
+	assert.Equal(t, "link", linkMark["type"])
+	assert.Equal(t, "https://example.com", linkMark["attrs"].(node)["href"])
+}
+
+func TestToADF_PipeTable_AlignmentRowVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		md   string
+	}{
+		{"plain", "| a | b |\n|---|---|\n| 1 | 2 |\n"},
+		{"left_right", "| a | b |\n|:--|--:|\n| 1 | 2 |\n"},
+		{"center", "| a | b |\n|:-:|:-:|\n| 1 | 2 |\n"},
+		{"padded", "| a | b |\n| --- | --- |\n| 1 | 2 |\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ToADF(tc.md)
+			require.NotNil(t, result)
+			content := result["content"].([]any)
+			require.Len(t, content, 1)
+			table := content[0].(node)
+			assert.Equal(t, "table", table["type"], "alignment row variant must produce a table node")
+			rows := table["content"].([]any)
+			require.Len(t, rows, 2, "alignment row must be consumed, not emitted")
+		})
+	}
+}
+
 func TestToADF_ThematicBreak(t *testing.T) {
 	result := ToADF("above\n\n---\n\nbelow")
 	require.NotNil(t, result)
