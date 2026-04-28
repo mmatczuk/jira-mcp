@@ -6,14 +6,16 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	east "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/text"
 )
 
 type node = map[string]any
 
 // md is a package-level goldmark instance. The default parser is stateless
-// and safe for concurrent use.
-var md = goldmark.New()
+// and safe for concurrent use. The Table extension enables GFM pipe tables.
+var md = goldmark.New(goldmark.WithExtensions(extension.Table))
 
 // ToADF converts a Markdown string to an ADF document map.
 // Returns nil if the input is empty.
@@ -116,6 +118,9 @@ func convertNode(n ast.Node, source []byte) node {
 	case *ast.ThematicBreak:
 		return node{"type": "rule"}
 
+	case *east.Table:
+		return convertTable(n, source)
+
 	default:
 		content := convertInlineChildren(n, source)
 		if len(content) > 0 {
@@ -125,6 +130,54 @@ func convertNode(n ast.Node, source []byte) node {
 			}
 		}
 		return nil
+	}
+}
+
+// convertTable converts a GFM pipe table into an ADF table node. The header
+// row's cells become tableHeader, body row cells become tableCell.
+func convertTable(n ast.Node, source []byte) node {
+	var rows []any
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		cellType := "tableCell"
+		if _, isHeader := child.(*east.TableHeader); isHeader {
+			cellType = "tableHeader"
+		}
+		if row := convertTableRow(child, source, cellType); row != nil {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return node{
+		"type":    "table",
+		"content": rows,
+	}
+}
+
+// convertTableRow converts a single header or body row. Cell inline content is
+// wrapped in a paragraph because ADF cells require block content.
+func convertTableRow(n ast.Node, source []byte, cellType string) node {
+	var cells []any
+	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		inline := convertInlineChildren(c, source)
+		if inline == nil {
+			inline = []any{}
+		}
+		cells = append(cells, node{
+			"type": cellType,
+			"content": []any{node{
+				"type":    "paragraph",
+				"content": inline,
+			}},
+		})
+	}
+	if len(cells) == 0 {
+		return nil
+	}
+	return node{
+		"type":    "tableRow",
+		"content": cells,
 	}
 }
 
