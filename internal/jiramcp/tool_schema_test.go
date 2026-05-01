@@ -131,6 +131,46 @@ func TestSchemaTransitions_Error(t *testing.T) {
 	assert.Contains(t, text, "issue not found")
 }
 
+// --- link_types ---
+
+func TestSchemaLinkTypes_Success(t *testing.T) {
+	mc := &mockClient{
+		GetIssueLinkTypesFn: func(context.Context) ([]jira.IssueLinkType, error) {
+			return []jira.IssueLinkType{
+				{ID: "10000", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"},
+				{ID: "10001", Name: "Relates", Inward: "relates to", Outward: "relates to"},
+			}, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callSchema(t, h, SchemaArgs{Resource: "link_types"})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Found 2 link type(s)")
+	assert.Contains(t, text, "Blocks")
+	assert.Contains(t, text, "blocks")
+	assert.Contains(t, text, "is blocked by")
+	assert.Contains(t, text, "Relates")
+}
+
+func TestSchemaLinkTypes_Error(t *testing.T) {
+	mc := &mockClient{
+		GetIssueLinkTypesFn: func(context.Context) ([]jira.IssueLinkType, error) {
+			return nil, fmt.Errorf("auth expired")
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callSchema(t, h, SchemaArgs{Resource: "link_types"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "auth expired")
+}
+
+func TestHandleSchema_UnknownResource_MentionsLinkTypes(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	text, isErr := callSchema(t, h, SchemaArgs{Resource: "bogus"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "link_types")
+}
+
 // --- field_options ---
 
 func TestSchemaFieldOptions_Success(t *testing.T) {

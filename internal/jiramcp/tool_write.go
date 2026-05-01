@@ -14,6 +14,19 @@ import (
 	"github.com/mmatczuk/jira-mcp/internal/mdconv"
 )
 
+// LinkItem is one entry in WriteItem.Links or WriteItem.Unlinks. Add
+// requires Type + From + To. Remove requires LinkID OR Type + From + To.
+// Comment is optional and only meaningful on add (Links). The link
+// endpoint only accepts ADF, so comments here are markdown-only — for
+// wiki-markup, use a separate comment action after the link is created.
+type LinkItem struct {
+	Type    string `json:"type,omitempty" jsonschema:"Link type name (e.g. Blocks, Relates, Duplicates). Use jira_schema resource=link_types to discover names and verb directions."`
+	From    string `json:"from,omitempty" jsonschema:"Issue key on the active side of the link. For type=Blocks, 'from' is the issue that does the blocking."`
+	To      string `json:"to,omitempty" jsonschema:"Issue key on the passive side of the link. For type=Blocks, 'to' is the issue that is blocked."`
+	LinkID  string `json:"link_id,omitempty" jsonschema:"Existing link ID. Optional in unlinks for unambiguous removal — read from the issuelinks field of jira_read."`
+	Comment string `json:"comment,omitempty" jsonschema:"Optional Markdown comment posted on the inward issue at link creation time. Wiki-markup is not supported here; for wiki, post a separate comment action after the link is created. Ignored on unlinks."`
+}
+
 type WriteItem struct {
 	Key               string   `json:"key,omitempty" jsonschema:"Issue key (e.g. PROJ-1). Required for update/delete/transition/comment/edit_comment."`
 	Project           string   `json:"project,omitempty" jsonschema:"Project key for create action."`
@@ -24,6 +37,7 @@ type WriteItem struct {
 	Description       string   `json:"description,omitempty" jsonschema:"Issue description. Format controlled by description_format (default Markdown → ADF)."`
 	DescriptionFormat string   `json:"description_format,omitempty" jsonschema:"How to interpret description. markdown (default): converted to ADF and sent via v3. wiki: sent verbatim as legacy Jira wiki-markup via v2. Allowed: markdown, wiki."`
 	Labels            []string `json:"labels,omitempty" jsonschema:"Issue labels."`
+	ParentKey         string   `json:"parent_key,omitempty" jsonschema:"Parent issue key (e.g. an Epic for a Story sub-task). Settable on create and update. Jira enforces type compatibility — typically only Epics can be parents in a given configuration. Pass an empty string to leave the parent unchanged on update."`
 
 	TransitionID string `json:"transition_id,omitempty" jsonschema:"Transition ID. Use jira_schema resource=transitions issue_key=X to find valid IDs."`
 
@@ -34,6 +48,9 @@ type WriteItem struct {
 	SprintID int `json:"sprint_id,omitempty" jsonschema:"Sprint ID for move_to_sprint action."`
 
 	FieldsJSON string `json:"fields_json,omitempty" jsonschema:"Raw JSON object merged into issue fields. Escape hatch for custom fields."`
+
+	Links   []LinkItem `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
+	Unlinks []LinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue. comment is ignored on unlinks."`
 }
 
 type WriteArgs struct {
@@ -48,8 +65,8 @@ var writeTool = &mcp.Tool{
 	Description: `Modify JIRA data. Batch-first: pass an array of items even for single operations.
 
 Actions:
-- create: Create issues. Each item needs: project, summary, issue_type. Optional: description (Markdown), assignee, priority, labels, fields_json.
-- update: Update issues. Each item needs: key. Provide fields to change: summary, description, assignee, priority, labels, fields_json.
+- create: Create issues. Each item needs: project, summary, issue_type. Optional: description (Markdown), assignee, priority, labels, parent_key, links, fields_json.
+- update: Update issues. Each item needs: key. Provide fields to change: summary, description, assignee, priority, labels, parent_key, links, unlinks, fields_json.
 - delete: Delete issues. Each item needs: key.
 - transition: Transition issues. Each item needs: key, transition_id. Optional: comment (Markdown). Hint: Use jira_schema resource=transitions to find IDs.
 - comment: Add comments. Each item needs: key, comment (Markdown).
@@ -61,9 +78,198 @@ Creating issues:
 - Pass custom fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
 - If the issue type is invalid for the project, the error lists available types.
 
+Linking issues:
+- links creates new issue links. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names and verb directions. 'from' is always the active side (e.g. for type=Blocks, 'from' blocks 'to'). Optional Markdown comment posts a comment on the inward issue at link time; for wiki-markup, post a separate comment action after the link is created.
+- unlinks removes links. Each entry needs link_id OR (type, from, to). When the triple is provided, the server resolves the link by reading issuelinks on the active issue.
+- parent_key sets the parent issue (e.g. an Epic for a sub-task). Available on create and update. Jira enforces parent-type compatibility per project configuration.
+- Labels still use the read-then-write replace-list pattern; link operations are targeted.
+
 All actions support dry_run=true to preview without executing.
 
 Descriptions and comments expect Markdown by default and are converted to ADF via the v3 API. Do not round-trip a jira_read result straight into jira_write — old issues return legacy Jira wiki-markup, which is not Markdown. Wiki-markup tokens ({code}, {{inline}}, h1., etc.) are detected and rejected on the default path. To send wiki-markup deliberately, set description_format="wiki" or comment_format="wiki" — the write is then routed through the v2 API with the raw string.`,
+}
+
+// linkDirection encodes which side of a link the active issue plays.
+//   - linkOutward: active key sits on the From (outward, active) side.
+//   - linkInward:  active key sits on the To (inward, passive) side.
+type linkDirection int
+
+const (
+	linkOutward linkDirection = iota
+	linkInward
+)
+
+// arrow renders the link as "from → to (type)" — used in success and
+// error messages on the links path.
+func (li LinkItem) arrow() string {
+	return fmt.Sprintf("%s → %s (%s)", li.From, li.To, li.Type)
+}
+
+// triple renders the link as "(from / type / to)" — used in unlink
+// messages where directionality is implied by surrounding text.
+func (li LinkItem) triple() string {
+	return fmt.Sprintf("(%s / %s / %s)", li.From, li.Type, li.To)
+}
+
+// resolveUnlinkDirection determines which side of li the activeKey plays.
+// Returns the direction and the "other" key. ok is false when activeKey
+// matches neither From nor To, in which case the caller should surface a
+// pass-link_id-explicitly error.
+func resolveUnlinkDirection(activeKey string, li LinkItem) (dir linkDirection, otherKey string, ok bool) {
+	switch activeKey {
+	case li.From:
+		return linkOutward, li.To, true
+	case li.To:
+		return linkInward, li.From, true
+	default:
+		return 0, "", false
+	}
+}
+
+// resolveLinkID walks the issuelinks of activeKey to find the unique link
+// matching (linkType, otherKey, direction). Returns an error mentioning
+// link_id if zero or more than one match.
+func (h *handlers) resolveLinkID(ctx context.Context, activeKey, linkType, otherKey string, dir linkDirection) (string, error) {
+	issue, err := h.client.GetIssue(ctx, activeKey, &jira.GetQueryOptions{Fields: "issuelinks"})
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s to resolve link id: %w", activeKey, err)
+	}
+	if issue == nil || issue.Fields == nil {
+		return "", fmt.Errorf("no link found from %s of type %s to %s — already removed?", activeKey, linkType, otherKey)
+	}
+
+	var matches []string
+	for _, l := range issue.Fields.IssueLinks {
+		if l == nil || !strings.EqualFold(l.Type.Name, linkType) {
+			continue
+		}
+		switch dir {
+		case linkOutward:
+			if l.InwardIssue != nil && l.InwardIssue.Key == otherKey {
+				matches = append(matches, l.ID)
+			}
+		case linkInward:
+			if l.OutwardIssue != nil && l.OutwardIssue.Key == otherKey {
+				matches = append(matches, l.ID)
+			}
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no %s link found between %s and %s — already removed? Pass link_id explicitly to remove a specific link", linkType, activeKey, otherKey)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("multiple %s links between %s and %s (%d matches) — pass link_id explicitly to disambiguate", linkType, activeKey, otherKey, len(matches))
+	}
+}
+
+// applyUnlinks removes each link in items. When LinkID is empty, the
+// helper resolves it from the (Type, From, To) triple by reading the
+// active issue's issuelinks. activeKey must equal exactly one of From/To
+// to determine direction. Comment is ignored with a warning. dryRun
+// makes zero state-reading calls.
+func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []LinkItem, dryRun bool) []string {
+	out := make([]string, 0, len(items))
+	for _, li := range items {
+		if dryRun {
+			if li.LinkID != "" {
+				out = append(out, fmt.Sprintf("  Would unlink link %s.", li.LinkID))
+			} else {
+				out = append(out, fmt.Sprintf("  Would unlink %s — link_id resolved at apply time.", li.triple()))
+			}
+			continue
+		}
+
+		linkID := li.LinkID
+		if linkID == "" {
+			dir, otherKey, ok := resolveUnlinkDirection(activeKey, li)
+			if !ok {
+				out = append(out, fmt.Sprintf("  ERROR: unlink %s: active issue %s is on neither side of the link — pass link_id explicitly", li.triple(), activeKey))
+				continue
+			}
+			id, err := h.resolveLinkID(ctx, activeKey, li.Type, otherKey, dir)
+			if err != nil {
+				out = append(out, fmt.Sprintf("  ERROR: unlink %s: %v", li.triple(), err))
+				continue
+			}
+			linkID = id
+		}
+
+		if err := h.client.DeleteIssueLink(ctx, linkID); err != nil {
+			out = append(out, fmt.Sprintf("  ERROR: unlink link %s: %v", linkID, err))
+			continue
+		}
+
+		line := fmt.Sprintf("  Unlinked link %s.", linkID)
+		if li.Comment != "" {
+			line += " (comment ignored on unlinks)"
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// applyLinks creates each link in items in order. Per-entry errors are
+// collected and formatted as result lines; never short-circuits.
+// Each LinkItem maps to a CreateIssueLinkInput as From=outward, To=inward.
+func (h *handlers) applyLinks(ctx context.Context, items []LinkItem, dryRun bool) []string {
+	out := make([]string, 0, len(items))
+	for _, li := range items {
+		arrow := li.arrow()
+		if dryRun {
+			out = append(out, fmt.Sprintf("  Would link %s.", arrow))
+			continue
+		}
+		in := jira.CreateIssueLinkInput{
+			Type:         li.Type,
+			OutwardIssue: li.From,
+			InwardIssue:  li.To,
+		}
+		if li.Comment != "" {
+			body, _, err := buildCommentBody(li.Comment, formatMarkdown)
+			if err != nil {
+				out = append(out, fmt.Sprintf("  ERROR: link %s rejected: %v", arrow, err))
+				continue
+			}
+			in.Comment = &jira.IssueLinkComment{Body: body}
+		}
+		if err := h.client.CreateIssueLink(ctx, in); err != nil {
+			out = append(out, fmt.Sprintf("  ERROR: link failed %s: %v", arrow, err))
+			continue
+		}
+		out = append(out, fmt.Sprintf("  Linked %s.", arrow))
+	}
+	return out
+}
+
+// validateLinkItems performs static checks on a slice of LinkItem entries.
+// isUnlink toggles the rule set: links require Type+From+To, unlinks require
+// LinkID OR Type+From+To. Self-links are always rejected.
+func validateLinkItems(items []LinkItem, isUnlink bool) error {
+	what := "links"
+	if isUnlink {
+		what = "unlinks"
+	}
+	for i, li := range items {
+		if isUnlink {
+			if li.LinkID == "" && (li.Type == "" || li.From == "" || li.To == "") {
+				return fmt.Errorf("%s[%d]: provide link_id or all of (type, from, to) to identify the link", what, i)
+			}
+		} else {
+			if li.Type == "" {
+				return fmt.Errorf("%s[%d]: type is required (e.g. Blocks). Use jira_schema resource=link_types to discover valid names", what, i)
+			}
+			if li.From == "" || li.To == "" {
+				return fmt.Errorf("%s[%d]: from and to are required and must be issue keys", what, i)
+			}
+		}
+		if li.From != "" && li.To != "" && li.From == li.To {
+			return fmt.Errorf("%s[%d]: cannot link an issue to itself (from=%s to=%s)", what, i, li.From, li.To)
+		}
+	}
+	return nil
 }
 
 // createMetaCache caches create-metadata API responses within a single
@@ -277,6 +483,9 @@ func buildIssuePayload(item WriteItem) (payload map[string]any, format string, e
 	if item.Labels != nil {
 		fields["labels"] = item.Labels
 	}
+	if item.ParentKey != "" {
+		fields["parent"] = map[string]any{"key": item.ParentKey}
+	}
 	if item.Description != "" {
 		switch format {
 		case formatWiki:
@@ -350,6 +559,12 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 	if item.Project == "" || item.Summary == "" || item.IssueType == "" {
 		return "", fmt.Errorf("create requires project, summary, and issue_type. Got project=%q summary=%q issue_type=%q", item.Project, item.Summary, item.IssueType)
 	}
+	if len(item.Unlinks) > 0 {
+		return "", fmt.Errorf("unlinks not valid on action=create — nothing to unlink. Use action=update on an existing issue")
+	}
+	if err := validateLinkItems(item.Links, false); err != nil {
+		return "", err
+	}
 
 	payload, format, err := buildIssuePayload(item)
 	if err != nil {
@@ -369,7 +584,11 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 
 	if dryRun {
 		data, _ := json.MarshalIndent(payload, "", "  ")
-		return fmt.Sprintf("Would create issue in project %s with type %s:\n%s%s", item.Project, item.IssueType, string(data), preflightHint), nil
+		head := fmt.Sprintf("Would create issue in project %s with type %s:\n%s%s", item.Project, item.IssueType, string(data), preflightHint)
+		if linkLines := h.applyLinks(ctx, item.Links, true); len(linkLines) > 0 {
+			head += "\n" + strings.Join(linkLines, "\n")
+		}
+		return head, nil
 	}
 
 	var key string
@@ -382,7 +601,11 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 		return "", fmt.Errorf("failed to create issue in %s: %w; %s%s", item.Project, err, createErrorHints(err), preflightHint)
 	}
 
-	return fmt.Sprintf("Created %s — %s (project=%s, type=%s). Hint: Use jira_read keys=[\"%s\"] to see the full issue.", key, item.Summary, item.Project, item.IssueType, key), nil
+	msg := fmt.Sprintf("Created %s — %s (project=%s, type=%s). Hint: Use jira_read keys=[\"%s\"] to see the full issue.", key, item.Summary, item.Project, item.IssueType, key)
+	if linkLines := h.applyLinks(ctx, item.Links, false); len(linkLines) > 0 {
+		msg += "\n" + strings.Join(linkLines, "\n")
+	}
+	return msg, nil
 }
 
 // preflightRequiredFields fetches create metadata and returns an error message
@@ -475,27 +698,60 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool)
 	if item.Key == "" {
 		return "", fmt.Errorf("update requires key")
 	}
+	if err := validateLinkItems(item.Links, false); err != nil {
+		return "", err
+	}
+	if err := validateLinkItems(item.Unlinks, true); err != nil {
+		return "", err
+	}
 
 	payload, format, err := buildIssuePayload(item)
 	if err != nil {
 		return "", err
 	}
 
+	fields, _ := payload["fields"].(map[string]any)
+	hasFieldUpdates := len(fields) > 0
+
 	if dryRun {
-		data, _ := json.MarshalIndent(payload, "", "  ")
-		return fmt.Sprintf("Would update %s with:\n%s", item.Key, string(data)), nil
+		var head string
+		if hasFieldUpdates {
+			data, _ := json.MarshalIndent(payload, "", "  ")
+			head = fmt.Sprintf("Would update %s with:\n%s", item.Key, string(data))
+		} else {
+			head = fmt.Sprintf("No field updates on %s.", item.Key)
+		}
+		var extra []string
+		extra = append(extra, h.applyUnlinks(ctx, item.Key, item.Unlinks, true)...)
+		extra = append(extra, h.applyLinks(ctx, item.Links, true)...)
+		if len(extra) > 0 {
+			head += "\n" + strings.Join(extra, "\n")
+		}
+		return head, nil
 	}
 
-	if format == formatWiki {
-		err = h.client.UpdateIssueV2(ctx, item.Key, payload)
+	var msg string
+	if hasFieldUpdates {
+		if format == formatWiki {
+			err = h.client.UpdateIssueV2(ctx, item.Key, payload)
+		} else {
+			err = h.client.UpdateIssueV3(ctx, item.Key, payload)
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to update %s: %w", item.Key, err)
+		}
+		msg = fmt.Sprintf("Updated %s successfully.", item.Key)
 	} else {
-		err = h.client.UpdateIssueV3(ctx, item.Key, payload)
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to update %s: %w", item.Key, err)
+		msg = fmt.Sprintf("No field updates on %s.", item.Key)
 	}
 
-	return fmt.Sprintf("Updated %s successfully.", item.Key), nil
+	var extra []string
+	extra = append(extra, h.applyUnlinks(ctx, item.Key, item.Unlinks, false)...)
+	extra = append(extra, h.applyLinks(ctx, item.Links, false)...)
+	if len(extra) > 0 {
+		msg += "\n" + strings.Join(extra, "\n")
+	}
+	return msg, nil
 }
 
 func (h *handlers) writeDelete(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
