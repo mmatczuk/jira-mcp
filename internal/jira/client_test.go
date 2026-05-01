@@ -368,6 +368,175 @@ func TestUpdateCommentV2_HappyPath(t *testing.T) {
 	assert.Equal(t, "h2. edited", gotBody["body"])
 }
 
+// --- Issue link types ---
+
+func TestIssueLinkType_JSONUnmarshal(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want IssueLinkType
+	}{
+		{
+			name: "blocks",
+			json: `{"id":"10000","name":"Blocks","inward":"is blocked by","outward":"blocks"}`,
+			want: IssueLinkType{ID: "10000", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"},
+		},
+		{
+			name: "relates",
+			json: `{"id":"10001","name":"Relates","inward":"relates to","outward":"relates to"}`,
+			want: IssueLinkType{ID: "10001", Name: "Relates", Inward: "relates to", Outward: "relates to"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got IssueLinkType
+			require.NoError(t, json.Unmarshal([]byte(tc.json), &got))
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// --- GetIssueLinkTypes ---
+
+func TestGetIssueLinkTypes_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issueLinkTypes":[
+			{"id":"10000","name":"Blocks","inward":"is blocked by","outward":"blocks"},
+			{"id":"10001","name":"Relates","inward":"relates to","outward":"relates to"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetIssueLinkTypes(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issueLinkType", gotPath)
+	assert.Equal(t, "GET", gotMethod)
+	require.Len(t, got, 2)
+	assert.Equal(t, IssueLinkType{ID: "10000", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"}, got[0])
+	assert.Equal(t, "Relates", got[1].Name)
+}
+
+func TestGetIssueLinkTypes_Error_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetIssueLinkTypes(context.Background())
+	require.Error(t, err)
+}
+
+// --- CreateIssueLink ---
+
+func TestCreateIssueLink_NoComment(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.CreateIssueLink(context.Background(), CreateIssueLinkInput{
+		Type:         "Blocks",
+		InwardIssue:  "PROJ-1",
+		OutwardIssue: "PROJ-2",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issueLink", gotPath)
+	assert.Equal(t, "POST", gotMethod)
+
+	require.Equal(t, "Blocks", gotBody["type"].(map[string]any)["name"])
+	require.Equal(t, "PROJ-1", gotBody["inwardIssue"].(map[string]any)["key"])
+	require.Equal(t, "PROJ-2", gotBody["outwardIssue"].(map[string]any)["key"])
+	_, hasComment := gotBody["comment"]
+	assert.False(t, hasComment, "comment key must be absent when input.Comment is nil")
+}
+
+func TestCreateIssueLink_WithADFComment(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	adf := map[string]any{
+		"version": 1, "type": "doc",
+		"content": []any{map[string]any{"type": "paragraph"}},
+	}
+
+	c := newTestClient(t, srv.URL)
+	err := c.CreateIssueLink(context.Background(), CreateIssueLinkInput{
+		Type:         "Blocks",
+		InwardIssue:  "PROJ-1",
+		OutwardIssue: "PROJ-2",
+		Comment:      &IssueLinkComment{Body: adf},
+	})
+	require.NoError(t, err)
+
+	commentMap, ok := gotBody["comment"].(map[string]any)
+	require.True(t, ok, "comment should be an object")
+	assert.Equal(t, "doc", commentMap["body"].(map[string]any)["type"])
+}
+
+func TestCreateIssueLink_Error_400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errorMessages":["Issue does not exist"]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.CreateIssueLink(context.Background(), CreateIssueLinkInput{
+		Type: "Blocks", InwardIssue: "X-1", OutwardIssue: "X-2",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Issue does not exist")
+}
+
+// --- DeleteIssueLink ---
+
+func TestDeleteIssueLink_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteIssueLink(context.Background(), "10042")
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issueLink/10042", gotPath)
+	assert.Equal(t, "DELETE", gotMethod)
+}
+
+func TestDeleteIssueLink_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errorMessages":["No link with id 9999 exists"]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteIssueLink(context.Background(), "9999")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "No link with id 9999 exists")
+}
+
 // --- GetFieldOptions multi-context ---
 
 func TestGetFieldOptions_MultipleContexts(t *testing.T) {

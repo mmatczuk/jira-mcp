@@ -35,6 +35,9 @@ type mockClient struct {
 	GetFieldsFn               func(ctx context.Context) ([]jira.Field, error)
 	GetTransitionsFn          func(ctx context.Context, key string) ([]jira.Transition, error)
 	GetFieldOptionsFn         func(ctx context.Context, fieldID string) ([]json.RawMessage, error)
+	CreateIssueLinkFn         func(ctx context.Context, in jira.CreateIssueLinkInput) error
+	DeleteIssueLinkFn         func(ctx context.Context, linkID string) error
+	GetIssueLinkTypesFn       func(ctx context.Context) ([]jira.IssueLinkType, error)
 }
 
 func (m *mockClient) GetMyself(ctx context.Context) (*jira.User, error) {
@@ -203,4 +206,25 @@ func (m *mockClient) GetFieldOptions(ctx context.Context, fieldID string) ([]jso
 		panic(fmt.Sprintf("mockClient.GetFieldOptions called but GetFieldOptionsFn not set (fieldID=%s)", fieldID))
 	}
 	return m.GetFieldOptionsFn(ctx, fieldID)
+}
+
+func (m *mockClient) CreateIssueLink(ctx context.Context, in jira.CreateIssueLinkInput) error {
+	if m.CreateIssueLinkFn == nil {
+		panic(fmt.Sprintf("mockClient.CreateIssueLink called but CreateIssueLinkFn not set (type=%s, in=%s, out=%s)", in.Type, in.InwardIssue, in.OutwardIssue))
+	}
+	return m.CreateIssueLinkFn(ctx, in)
+}
+
+func (m *mockClient) DeleteIssueLink(ctx context.Context, linkID string) error {
+	if m.DeleteIssueLinkFn == nil {
+		panic(fmt.Sprintf("mockClient.DeleteIssueLink called but DeleteIssueLinkFn not set (linkID=%s)", linkID))
+	}
+	return m.DeleteIssueLinkFn(ctx, linkID)
+}
+
+func (m *mockClient) GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkType, error) {
+	if m.GetIssueLinkTypesFn == nil {
+		panic("mockClient.GetIssueLinkTypes called but GetIssueLinkTypesFn not set")
+	}
+	return m.GetIssueLinkTypesFn(ctx)
 }

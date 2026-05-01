@@ -33,4 +33,7 @@ type JiraClient interface {
 	GetFields(ctx context.Context) ([]jira.Field, error)
 	GetTransitions(ctx context.Context, key string) ([]jira.Transition, error)
 	GetFieldOptions(ctx context.Context, fieldID string) ([]json.RawMessage, error)
+	CreateIssueLink(ctx context.Context, in jira.CreateIssueLinkInput) error
+	DeleteIssueLink(ctx context.Context, linkID string) error
+	GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkType, error)
 }

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type SchemaArgs struct {
-	Resource string `json:"resource" jsonschema:"Metadata to discover: fields, transitions, field_options."`
+	Resource string `json:"resource" jsonschema:"Metadata to discover: fields, transitions, field_options, link_types."`
 	IssueKey string `json:"issue_key,omitempty" jsonschema:"Issue key. Required for resource=transitions."`
 	FieldID  string `json:"field_id,omitempty" jsonschema:"Field ID. Required for resource=field_options (e.g. customfield_10001)."`
 }
@@ -22,6 +23,7 @@ Resources:
 - fields: List all available fields (standard and custom). Returns field ID, name, and type.
 - transitions: List available transitions for an issue. Requires issue_key. Returns transition ID and name — use these IDs with jira_write action=transition.
 - field_options: List allowed values for a custom field. Requires field_id (e.g. customfield_10001). Fetches the field's context, then its options.
+- link_types: List available issue link types. Returns id, name, inward verb, outward verb. The 'from' field on jira_write links is always the active (outward) side.
 
 Hint: Always check transitions before transitioning an issue. Field IDs from "fields" can be used in jira_write fields_json.`,
 }
@@ -34,8 +36,10 @@ func (h *handlers) handleSchema(ctx context.Context, _ *mcp.CallToolRequest, arg
 		return h.schemaTransitions(ctx, args), nil, nil
 	case "field_options":
 		return h.schemaFieldOptions(ctx, args), nil, nil
+	case "link_types":
+		return h.schemaLinkTypes(ctx), nil, nil
 	default:
-		return textResult(fmt.Sprintf("Unknown resource %q. Valid: fields, transitions, field_options.", args.Resource), true), nil, nil
+		return textResult(fmt.Sprintf("Unknown resource %q. Valid: fields, transitions, field_options, link_types.", args.Resource), true), nil, nil
 	}
 }
 
@@ -92,6 +96,36 @@ func (h *handlers) schemaTransitions(ctx context.Context, args SchemaArgs) *mcp.
 	data, _ := json.Marshal(results)
 	out := fmt.Sprintf("Found %d transition(s) for %s. Use the transition ID with jira_write action=transition transition_id=<id>.\n\n%s", len(results), args.IssueKey, string(data))
 
+	return textResult(out, false)
+}
+
+func (h *handlers) schemaLinkTypes(ctx context.Context) *mcp.CallToolResult {
+	types, err := h.client.GetIssueLinkTypes(ctx)
+	if err != nil {
+		return textResult(fmt.Sprintf("Failed to list link types: %v", err), true)
+	}
+
+	results := make([]map[string]any, 0, len(types))
+	bullets := make([]string, 0, len(types))
+	for _, t := range types {
+		results = append(results, map[string]any{
+			"id":      t.ID,
+			"name":    t.Name,
+			"inward":  t.Inward,
+			"outward": t.Outward,
+		})
+		if t.Inward != t.Outward {
+			bullets = append(bullets, fmt.Sprintf("  %s: from %s to (inverse: to %s from)", t.Name, t.Outward, t.Inward))
+		} else {
+			bullets = append(bullets, fmt.Sprintf("  %s: from %s to", t.Name, t.Outward))
+		}
+	}
+
+	data, _ := json.Marshal(results)
+	out := fmt.Sprintf(
+		"Found %d link type(s). Use the 'name' field with jira_write links/unlinks. For each type:\n%s\n\n%s",
+		len(results), strings.Join(bullets, "\n"), string(data),
+	)
 	return textResult(out, false)
 }
 

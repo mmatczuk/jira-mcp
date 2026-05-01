@@ -137,6 +137,91 @@ func (c *Client) GetCreateMetaFields(ctx context.Context, projectKey, issueTypeI
 	return fields, err
 }
 
+// IssueLinkType describes an entry returned by GET /rest/api/3/issueLinkType.
+// Inward and Outward carry the verb pair (e.g. "is blocked by" / "blocks").
+type IssueLinkType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Inward  string `json:"inward"`
+	Outward string `json:"outward"`
+}
+
+// IssueLinkComment is the optional comment posted alongside link creation.
+// Body may be either an ADF document map (v3 default) or a raw string —
+// callers should send ADF since POST /rest/api/3/issueLink does not accept
+// legacy wiki-markup.
+type IssueLinkComment struct {
+	Body any
+}
+
+// CreateIssueLinkInput is the request shape for POST /rest/api/3/issueLink.
+// InwardIssue is the passive side, OutwardIssue is the active side
+// ("OutwardIssue blocks InwardIssue" for type=Blocks).
+type CreateIssueLinkInput struct {
+	Type         string
+	InwardIssue  string
+	OutwardIssue string
+	Comment      *IssueLinkComment
+}
+
+// GetIssueLinkTypes returns the issue link types configured on the Jira
+// instance. Used by jira_schema link_types so callers can discover the
+// (name, inward, outward) verb triples needed to construct unambiguous
+// link writes.
+func (c *Client) GetIssueLinkTypes(ctx context.Context) ([]IssueLinkType, error) {
+	var types []IssueLinkType
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		req, err := c.j.NewRequestWithContext(ctx, "GET", "rest/api/3/issueLinkType", nil)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			IssueLinkTypes []IssueLinkType `json:"issueLinkTypes"`
+		}
+		resp, err := c.j.Do(req, &result)
+		types = result.IssueLinkTypes
+		return resp, err
+	})
+	return types, err
+}
+
+// CreateIssueLink creates an issue link via POST /rest/api/3/issueLink.
+// Jira returns 201 with no body on success. When in.Comment is non-nil the
+// comment is posted on the inward issue in the same call; the body must be
+// ADF — this endpoint does not accept legacy wiki-markup.
+func (c *Client) CreateIssueLink(ctx context.Context, in CreateIssueLinkInput) error {
+	body := map[string]any{
+		"type":         map[string]any{"name": in.Type},
+		"inwardIssue":  map[string]any{"key": in.InwardIssue},
+		"outwardIssue": map[string]any{"key": in.OutwardIssue},
+	}
+	if in.Comment != nil {
+		body["comment"] = map[string]any{"body": in.Comment.Body}
+	}
+	return c.retry(ctx, func() (*jira.Response, error) {
+		req, err := c.j.NewRequestWithContext(ctx, "POST", "rest/api/3/issueLink", body)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, nil)
+		return resp, err
+	})
+}
+
+// DeleteIssueLink removes an issue link via DELETE /rest/api/3/issueLink/{linkID}.
+// Jira returns 204 on success.
+func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
+	return c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/issueLink/%s", url.PathEscape(linkID))
+		req, err := c.j.NewRequestWithContext(ctx, "DELETE", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, nil)
+		return resp, err
+	})
+}
+
 // GetIssue fetches an issue by key.
 func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {
 	var issue *jira.Issue

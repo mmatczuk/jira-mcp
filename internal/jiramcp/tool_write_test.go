@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
+	gojira "github.com/andygrunwald/go-jira"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -77,6 +79,21 @@ func TestBuildIssuePayload_FieldsJSON_Invalid(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid fields_json")
 }
 
+func TestBuildIssuePayload_ParentKey_Set(t *testing.T) {
+	payload, _, err := buildIssuePayload(WriteItem{Summary: "s", ParentKey: "PROJ-99"})
+	require.NoError(t, err)
+	fields := payload["fields"].(map[string]any)
+	assert.Equal(t, map[string]any{"key": "PROJ-99"}, fields["parent"])
+}
+
+func TestBuildIssuePayload_ParentKey_Empty_OmitsParent(t *testing.T) {
+	payload, _, err := buildIssuePayload(WriteItem{Summary: "s"})
+	require.NoError(t, err)
+	fields := payload["fields"].(map[string]any)
+	_, has := fields["parent"]
+	assert.False(t, has, "parent must be absent when ParentKey is empty")
+}
+
 func TestBuildIssuePayload_FieldsJSON_OverridesStandard(t *testing.T) {
 	item := WriteItem{
 		Summary:    "original",
@@ -140,6 +157,37 @@ func TestWriteTool_FormatEnums(t *testing.T) {
 			require.NotNil(t, prop, "missing property")
 			assert.Equal(t, []any{formatMarkdown, formatWiki}, prop.Enum)
 		})
+	}
+}
+
+// TestWriteTool_LinkItemHasNoCommentFormat guards the deliberate omission
+// of comment_format on LinkItem: the link endpoint only accepts ADF, so
+// surfacing a markdown/wiki enum would only invite the LLM to set "wiki"
+// and hit a runtime rejection. Markdown-only is the contract.
+func TestWriteTool_LinkItemHasNoCommentFormat(t *testing.T) {
+	schema, ok := writeTool.InputSchema.(*jsonschema.Schema)
+	require.True(t, ok)
+
+	itemSchema := schema.Properties["items"].Items
+	require.NotNil(t, itemSchema)
+
+	for _, slot := range []string{"links", "unlinks"} {
+		t.Run(slot, func(t *testing.T) {
+			parent := itemSchema.Properties[slot]
+			require.NotNil(t, parent, "missing slot %s on items", slot)
+			require.NotNil(t, parent.Items, "missing items schema for %s", slot)
+			_, has := parent.Items.Properties["comment_format"]
+			assert.False(t, has, "comment_format must not be exposed on %s.items — link comments are markdown-only", slot)
+		})
+	}
+}
+
+// TestWriteToolDescription_MentionsLinks guards the load-bearing tool
+// description: links, unlinks, parent_key, and link_types must all appear
+// so the LLM has guidance from the tool listing alone.
+func TestWriteToolDescription_MentionsLinks(t *testing.T) {
+	for _, want := range []string{"links", "unlinks", "parent_key", "link_types"} {
+		assert.Contains(t, writeTool.Description, want)
 	}
 }
 
@@ -310,6 +358,804 @@ func TestWriteCreate_InvalidFieldsJSON(t *testing.T) {
 	assert.False(t, isErr)
 	assert.Contains(t, text, "ERROR")
 	assert.Contains(t, text, "invalid fields_json")
+}
+
+// --- link/unlink validation ---
+
+func TestHandleWrite_Create_RejectsUnlinks(t *testing.T) {
+	mc := &mockClient{} // no Fns set: any API call panics
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project:   "PROJ",
+			Summary:   "s",
+			IssueType: "Task",
+			Unlinks:   []LinkItem{{LinkID: "1"}},
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "unlinks")
+	assert.Contains(t, text, "create")
+}
+
+func TestHandleWrite_Links_MissingType_Rejected(t *testing.T) {
+	for _, action := range []string{"create", "update"} {
+		t.Run(action, func(t *testing.T) {
+			mc := &mockClient{}
+			withCreateMeta(mc, "Task")
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: action,
+				Items: []WriteItem{{
+					Project:   "PROJ",
+					Key:       "PROJ-1",
+					Summary:   "s",
+					IssueType: "Task",
+					Links:     []LinkItem{{From: "PROJ-1", To: "PROJ-2"}},
+				}},
+			})
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, "type is required")
+		})
+	}
+}
+
+func TestHandleWrite_Links_MissingFromOrTo_Rejected(t *testing.T) {
+	cases := []struct {
+		name string
+		link LinkItem
+	}{
+		{"no from", LinkItem{Type: "Blocks", To: "PROJ-2"}},
+		{"no to", LinkItem{Type: "Blocks", From: "PROJ-1"}},
+		{"neither", LinkItem{Type: "Blocks"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{}
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: "update",
+				Items:  []WriteItem{{Key: "PROJ-1", Links: []LinkItem{tc.link}}},
+			})
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, "from and to")
+		})
+	}
+}
+
+func TestHandleWrite_Unlinks_NoLinkIDOrTriple_Rejected(t *testing.T) {
+	mc := &mockClient{}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-1"}}, // missing To and LinkID
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "link_id")
+}
+
+func TestHandleWrite_Links_SelfLink_Rejected(t *testing.T) {
+	mc := &mockClient{}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:   "PROJ-1",
+			Links: []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-1"}},
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "cannot link an issue to itself")
+}
+
+// --- applyLinks ---
+
+func TestApplyLinks_AllSucceed(t *testing.T) {
+	var calls []jira.CreateIssueLinkInput
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			calls = append(calls, in)
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+
+	lines := h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+		{Type: "Relates", From: "PROJ-1", To: "PROJ-3"},
+	}, false)
+
+	require.Len(t, calls, 2)
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], "Linked PROJ-1 → PROJ-2 (Blocks)")
+	assert.Contains(t, lines[1], "Linked PROJ-1 → PROJ-3 (Relates)")
+}
+
+func TestApplyLinks_FromToTranslation(t *testing.T) {
+	var got jira.CreateIssueLinkInput
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			got = in
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+
+	_ = h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, false)
+
+	assert.Equal(t, "Blocks", got.Type)
+	assert.Equal(t, "PROJ-1", got.OutwardIssue, "from=outward")
+	assert.Equal(t, "PROJ-2", got.InwardIssue, "to=inward")
+}
+
+func TestApplyLinks_PartialFailure(t *testing.T) {
+	var n int
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			n++
+			if n == 2 {
+				return fmt.Errorf("boom")
+			}
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+
+	lines := h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-3"},
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-4"},
+	}, false)
+
+	require.Len(t, lines, 3)
+	assert.Contains(t, lines[0], "Linked PROJ-1 → PROJ-2")
+	assert.Contains(t, lines[1], "ERROR")
+	assert.Contains(t, lines[1], "PROJ-1 → PROJ-3")
+	assert.Contains(t, lines[1], "boom")
+	assert.Contains(t, lines[2], "Linked PROJ-1 → PROJ-4")
+}
+
+func TestApplyLinks_DryRun(t *testing.T) {
+	mc := &mockClient{} // any API call panics
+	h := newWriteHandlers(mc)
+
+	lines := h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, true)
+
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], "Would link PROJ-1 → PROJ-2 (Blocks)")
+}
+
+// --- writeCreate + Links integration ---
+
+func TestHandleWrite_Create_WithLinks_Success(t *testing.T) {
+	var linkCalls []jira.CreateIssueLinkInput
+	mc := &mockClient{
+		CreateIssueV3Fn: func(_ context.Context, _ map[string]any) (string, string, error) {
+			return "PROJ-9", "10009", nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			linkCalls = append(linkCalls, in)
+			return nil
+		},
+	}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project: "PROJ", Summary: "s", IssueType: "Task",
+			Links: []LinkItem{
+				{Type: "Blocks", From: "PROJ-9", To: "PROJ-2"},
+				{Type: "Relates", From: "PROJ-9", To: "PROJ-3"},
+			},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Created PROJ-9")
+	assert.Contains(t, text, "Linked PROJ-9 → PROJ-2 (Blocks)")
+	assert.Contains(t, text, "Linked PROJ-9 → PROJ-3 (Relates)")
+	require.Len(t, linkCalls, 2)
+}
+
+func TestHandleWrite_Create_WithLinks_PartialFailure(t *testing.T) {
+	n := 0
+	mc := &mockClient{
+		CreateIssueV3Fn: func(_ context.Context, _ map[string]any) (string, string, error) {
+			return "PROJ-9", "10009", nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			n++
+			if n == 2 {
+				return fmt.Errorf("permission denied")
+			}
+			return nil
+		},
+	}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project: "PROJ", Summary: "s", IssueType: "Task",
+			Links: []LinkItem{
+				{Type: "Blocks", From: "PROJ-9", To: "PROJ-2"},
+				{Type: "Blocks", From: "PROJ-9", To: "PROJ-3"},
+			},
+		}},
+	})
+	assert.Contains(t, text, "Created PROJ-9")
+	assert.Contains(t, text, "Linked PROJ-9 → PROJ-2")
+	assert.Contains(t, text, "ERROR: link failed PROJ-9 → PROJ-3")
+	assert.Contains(t, text, "permission denied")
+}
+
+func TestHandleWrite_Create_LinkSkippedWhenIssueCreateFails(t *testing.T) {
+	linkCalled := false
+	mc := &mockClient{
+		CreateIssueV3Fn: func(_ context.Context, _ map[string]any) (string, string, error) {
+			return "", "", fmt.Errorf("boom")
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			linkCalled = true
+			return nil
+		},
+	}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project: "PROJ", Summary: "s", IssueType: "Task",
+			Links: []LinkItem{{Type: "Blocks", From: "X", To: "Y"}},
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.False(t, linkCalled, "links must not be attempted if issue create failed")
+}
+
+func TestHandleWrite_Create_DryRun_LinksAppearInPreview(t *testing.T) {
+	mc := &mockClient{} // no real API calls allowed
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "create",
+		DryRun: true,
+		Items: []WriteItem{{
+			Project: "PROJ", Summary: "s", IssueType: "Task",
+			Links: []LinkItem{{Type: "Blocks", From: "<new>", To: "PROJ-2"}},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "DRY RUN")
+	assert.Contains(t, text, "Would create issue")
+	assert.Contains(t, text, "Would link <new> → PROJ-2 (Blocks)")
+}
+
+// --- applyLinks comment ---
+
+func TestApplyLinks_CommentMarkdown_BuildsADFBody(t *testing.T) {
+	var got jira.CreateIssueLinkInput
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			got = in
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2", Comment: "Hello **world**"},
+	}, false)
+	require.Len(t, lines, 1)
+	require.NotNil(t, got.Comment, "comment should be attached to the link request")
+	body, ok := got.Comment.Body.(map[string]any)
+	require.True(t, ok, "body must be ADF map")
+	assert.Equal(t, "doc", body["type"])
+}
+
+func TestApplyLinks_CommentMarkdown_DetectsWikiTokens_Rejected(t *testing.T) {
+	called := false
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			called = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2", Comment: "{code}wiki{code}"},
+	}, false)
+	require.Len(t, lines, 1)
+	assert.False(t, called)
+	assert.Contains(t, lines[0], "ERROR")
+	assert.Contains(t, lines[0], "wiki-markup")
+}
+
+func TestApplyLinks_CommentEmpty_NoCommentInRequest(t *testing.T) {
+	var got jira.CreateIssueLinkInput
+	mc := &mockClient{
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			got = in
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_ = h.applyLinks(context.Background(), []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, false)
+	assert.Nil(t, got.Comment, "no Comment string → no comment field on the request")
+}
+
+// --- resolveLinkID ---
+
+// linkFixture describes one entry to feed into makeIssueWithLinks.
+// activeIsOutward = true means the active issue is on the outward side
+// of this link, so otherKey is placed in InwardIssue.
+type linkFixture struct {
+	linkID, typeName, otherKey string
+	activeIsOutward            bool
+}
+
+// makeIssueWithLinks builds a *jira.Issue whose Fields.IssueLinks slice
+// reflects the given fixtures.
+func makeIssueWithLinks(entries ...linkFixture) *jira.Issue {
+	links := make([]*gojira.IssueLink, 0, len(entries))
+	for _, e := range entries {
+		l := &gojira.IssueLink{
+			ID:   e.linkID,
+			Type: gojira.IssueLinkType{Name: e.typeName},
+		}
+		if e.activeIsOutward {
+			l.InwardIssue = &gojira.Issue{Key: e.otherKey}
+		} else {
+			l.OutwardIssue = &gojira.Issue{Key: e.otherKey}
+		}
+		links = append(links, l)
+	}
+	return &gojira.Issue{Fields: &gojira.IssueFields{IssueLinks: links}}
+}
+
+func TestResolveLinkID_OutwardMatch(t *testing.T) {
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			assert.Equal(t, "PROJ-1", key)
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	id, err := h.resolveLinkID(context.Background(), "PROJ-1", "Blocks", "PROJ-2", linkOutward)
+	require.NoError(t, err)
+	assert.Equal(t, "10042", id)
+}
+
+func TestResolveLinkID_InwardMatch(t *testing.T) {
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	id, err := h.resolveLinkID(context.Background(), "PROJ-1", "Blocks", "PROJ-2", linkInward)
+	require.NoError(t, err)
+	assert.Equal(t, "10042", id)
+}
+
+func TestResolveLinkID_MultipleMatches_Errors(t *testing.T) {
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(
+				linkFixture{"10042", "Blocks", "PROJ-2", true},
+				linkFixture{"10043", "Blocks", "PROJ-2", true},
+			), nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, err := h.resolveLinkID(context.Background(), "PROJ-1", "Blocks", "PROJ-2", linkOutward)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple")
+	assert.Contains(t, err.Error(), "link_id")
+}
+
+func TestResolveLinkID_NoMatches_Errors(t *testing.T) {
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(), nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, err := h.resolveLinkID(context.Background(), "PROJ-1", "Blocks", "PROJ-2", linkOutward)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no")
+	assert.Contains(t, err.Error(), "Blocks")
+}
+
+func TestResolveLinkID_TypeNameCaseInsensitive(t *testing.T) {
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	id, err := h.resolveLinkID(context.Background(), "PROJ-1", "blocks", "PROJ-2", linkOutward)
+	require.NoError(t, err)
+	assert.Equal(t, "10042", id)
+}
+
+// --- applyUnlinks ---
+
+func TestApplyUnlinks_ByLinkID(t *testing.T) {
+	deleted := ""
+	mc := &mockClient{
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			deleted = linkID
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+		{LinkID: "10042"},
+	}, false)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "10042", deleted)
+	assert.Contains(t, lines[0], "Unlinked link 10042")
+}
+
+func TestApplyUnlinks_ByTriple(t *testing.T) {
+	getCalled := false
+	deleted := ""
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			getCalled = true
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+		},
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			deleted = linkID
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, false)
+	require.Len(t, lines, 1)
+	assert.True(t, getCalled, "GetIssue should be called for triple-form unlink")
+	assert.Equal(t, "10042", deleted)
+	assert.Contains(t, lines[0], "Unlinked")
+}
+
+func TestApplyUnlinks_ByTriple_InwardDirection(t *testing.T) {
+	deleted := ""
+	mc := &mockClient{
+		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			assert.Equal(t, "PROJ-2", key, "GetIssue must be called on the active key, not the From key")
+			// PROJ-1 (outward) Blocks PROJ-2 (inward, active). The fixture only
+			// matches when resolveLinkID is called with linkInward direction;
+			// any other direction would yield zero matches and an error.
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-1", false}), nil
+		},
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			deleted = linkID
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-2", []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, false)
+
+	require.Len(t, lines, 1)
+	assert.Equal(t, "10042", deleted)
+	assert.Contains(t, lines[0], "Unlinked link 10042")
+}
+
+func TestApplyUnlinks_ByTriple_NeitherSide_ErrorsWithoutGetIssue(t *testing.T) {
+	mc := &mockClient{} // any API call panics: no GetIssue, no DeleteIssueLink.
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-99", []LinkItem{
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, false)
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], "ERROR")
+	assert.Contains(t, lines[0], "PROJ-99")
+	assert.Contains(t, lines[0], "neither side")
+	assert.Contains(t, lines[0], "link_id")
+}
+
+func TestApplyUnlinks_PartialFailure(t *testing.T) {
+	mc := &mockClient{
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			if linkID == "20" {
+				return fmt.Errorf("not found")
+			}
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+		{LinkID: "10"},
+		{LinkID: "20"},
+		{LinkID: "30"},
+	}, false)
+	require.Len(t, lines, 3)
+	assert.Contains(t, lines[0], "Unlinked link 10")
+	assert.Contains(t, lines[1], "ERROR")
+	assert.Contains(t, lines[1], "20")
+	assert.Contains(t, lines[1], "not found")
+	assert.Contains(t, lines[2], "Unlinked link 30")
+}
+
+func TestApplyUnlinks_DryRun_NoGetIssue(t *testing.T) {
+	mc := &mockClient{} // any API call panics
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+		{LinkID: "10042"},
+		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+	}, true)
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], "Would unlink link 10042")
+	assert.Contains(t, lines[1], "Would unlink (PROJ-1 / Blocks / PROJ-2) — link_id resolved at apply time")
+}
+
+func TestApplyUnlinks_CommentIgnoredWithWarning(t *testing.T) {
+	mc := &mockClient{
+		DeleteIssueLinkFn: func(_ context.Context, _ string) error { return nil },
+	}
+	h := newWriteHandlers(mc)
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+		{LinkID: "10042", Comment: "ignored"},
+	}, false)
+	require.Len(t, lines, 1)
+	// Either an inline warning or a separate line; require either.
+	joined := lines[0]
+	assert.True(t,
+		strings.Contains(joined, "comment ignored") ||
+			strings.Contains(joined, "comment is ignored"),
+		"expected a warning that comment is ignored on unlink, got: %s", joined,
+	)
+}
+
+// --- end-to-end batch coverage ---
+
+// TestHandleWrite_Batch_Update_WithLinksUnlinksParent exercises a batch of
+// update items spanning the full link surface: triple-form unlink, markdown
+// comment on link creation, parent_key. Items share an action because
+// handleWrite dispatches by a single args.Action.
+func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
+	type call struct {
+		kind string
+		arg  string
+	}
+	var calls []call
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, key string, payload map[string]any) error {
+			fields := payload["fields"].(map[string]any)
+			if key == "PROJ-1" {
+				assert.Equal(t, map[string]any{"key": "EPIC-1"}, fields["parent"])
+			}
+			calls = append(calls, call{kind: "update", arg: key})
+			return nil
+		},
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(linkFixture{"55", "Blocks", "PROJ-9", true}), nil
+		},
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			calls = append(calls, call{kind: "delete", arg: linkID})
+			return nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
+			require.NotNil(t, in.Comment, "expected ADF comment on link creation")
+			calls = append(calls, call{kind: "create", arg: in.OutwardIssue + "→" + in.InwardIssue})
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{
+			{
+				Key:       "PROJ-1",
+				Summary:   "renamed",
+				ParentKey: "EPIC-1",
+				Links: []LinkItem{
+					{Type: "Blocks", From: "PROJ-1", To: "PROJ-2", Comment: "see **PROJ-2** for context"},
+				},
+			},
+			{
+				Key:     "PROJ-3",
+				Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-3", To: "PROJ-9"}},
+			},
+		},
+	})
+
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+	assert.Contains(t, text, "Linked PROJ-1 → PROJ-2 (Blocks)")
+	assert.Contains(t, text, "Unlinked link 55")
+
+	// PROJ-3 has no field changes, so UpdateIssueV3 must be skipped — only
+	// the unlink survives.
+	require.Len(t, calls, 3)
+	assert.Equal(t, call{"update", "PROJ-1"}, calls[0])
+	assert.Equal(t, call{"create", "PROJ-1→PROJ-2"}, calls[1])
+	assert.Equal(t, call{"delete", "55"}, calls[2])
+	assert.Contains(t, text, "No field updates on PROJ-3.")
+}
+
+// --- writeUpdate + Links/Unlinks integration ---
+
+func TestHandleWrite_Update_WithUnlinksByLinkID(t *testing.T) {
+	deleted := ""
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error { return nil },
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			deleted = linkID
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "new",
+			Unlinks: []LinkItem{{LinkID: "10042"}},
+		}},
+	})
+	assert.Equal(t, "10042", deleted)
+	assert.Contains(t, text, "Updated PROJ-1")
+	assert.Contains(t, text, "Unlinked link 10042")
+}
+
+func TestHandleWrite_Update_WithUnlinksByTriple(t *testing.T) {
+	deleted := ""
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error { return nil },
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+		},
+		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
+			deleted = linkID
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "x",
+			Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+		}},
+	})
+	assert.Equal(t, "10042", deleted)
+	assert.Contains(t, text, "Unlinked link 10042")
+}
+
+func TestHandleWrite_Update_LinksOnly_SkipsIssueUpdate(t *testing.T) {
+	updateCalled := false
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error {
+			updateCalled = true
+			return nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error { return nil },
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:   "PROJ-1",
+			Links: []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+		}},
+	})
+	assert.False(t, updateCalled, "no field changes → UpdateIssueV3 must not be called")
+	assert.Contains(t, text, "Linked PROJ-1 → PROJ-2 (Blocks)")
+}
+
+func TestHandleWrite_Update_FieldChangesPlusLinks(t *testing.T) {
+	updateCalled := false
+	linkCalled := false
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error {
+			updateCalled = true
+			return nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			linkCalled = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, _ = callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "title",
+			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+		}},
+	})
+	assert.True(t, updateCalled)
+	assert.True(t, linkCalled)
+}
+
+func TestHandleWrite_Update_UnlinksThenLinks_Order(t *testing.T) {
+	var order []string
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error { return nil },
+		DeleteIssueLinkFn: func(_ context.Context, _ string) error {
+			order = append(order, "delete")
+			return nil
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			order = append(order, "create")
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, _ = callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "x",
+			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-3"}},
+			Unlinks: []LinkItem{{LinkID: "10042"}},
+		}},
+	})
+	assert.Equal(t, []string{"delete", "create"}, order, "unlinks before links")
+}
+
+func TestHandleWrite_Update_FieldUpdateFails_LinksNotAttempted(t *testing.T) {
+	linkCalled := false
+	mc := &mockClient{
+		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error {
+			return fmt.Errorf("boom")
+		},
+		CreateIssueLinkFn: func(_ context.Context, _ jira.CreateIssueLinkInput) error {
+			linkCalled = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "x",
+			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+		}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.False(t, linkCalled, "links must not run if primary update failed")
+}
+
+func TestHandleWrite_Update_DryRun_LinksAndUnlinksInPreview(t *testing.T) {
+	mc := &mockClient{} // any API call panics
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		DryRun: true,
+		Items: []WriteItem{{
+			Key:     "PROJ-1",
+			Summary: "x",
+			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-3"}},
+			Unlinks: []LinkItem{
+				{LinkID: "10042"},
+				{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
+			},
+		}},
+	})
+	assert.Contains(t, text, "Would update PROJ-1")
+	assert.Contains(t, text, "Would unlink link 10042")
+	assert.Contains(t, text, "Would unlink (PROJ-1 / Blocks / PROJ-2) — link_id resolved at apply time")
+	assert.Contains(t, text, "Would link PROJ-1 → PROJ-3 (Blocks)")
 }
 
 // --- update ---
