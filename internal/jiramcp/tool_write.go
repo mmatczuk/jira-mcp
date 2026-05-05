@@ -14,17 +14,24 @@ import (
 	"github.com/mmatczuk/jira-mcp/internal/mdconv"
 )
 
-// LinkItem is one entry in WriteItem.Links or WriteItem.Unlinks. Add
-// requires Type + From + To. Remove requires LinkID OR Type + From + To.
-// Comment is optional and only meaningful on add (Links). The link
-// endpoint only accepts ADF, so comments here are markdown-only — for
-// wiki-markup, use a separate comment action after the link is created.
+// LinkItem is one entry in WriteItem.Links. Type + From + To are required.
+// The link endpoint only accepts ADF, so Comment is markdown-only — for
+// wiki-markup, post a separate comment action after the link is created.
 type LinkItem struct {
-	Type    string `json:"type,omitempty" jsonschema:"Link type name (e.g. Blocks, Relates, Duplicates). Use jira_schema resource=link_types to discover names and verb directions."`
-	From    string `json:"from,omitempty" jsonschema:"Issue key on the active side of the link. For type=Blocks, 'from' is the issue that does the blocking."`
-	To      string `json:"to,omitempty" jsonschema:"Issue key on the passive side of the link. For type=Blocks, 'to' is the issue that is blocked."`
-	LinkID  string `json:"link_id,omitempty" jsonschema:"Existing link ID. Optional in unlinks for unambiguous removal — read from the issuelinks field of jira_read."`
-	Comment string `json:"comment,omitempty" jsonschema:"Optional Markdown comment posted on the inward issue at link creation time. Wiki-markup is not supported here; for wiki, post a separate comment action after the link is created. Ignored on unlinks."`
+	Type    string `json:"type" jsonschema:"Link type name (e.g. Blocks, Relates, Duplicates). Use jira_schema resource=link_types to discover names and verb directions."`
+	From    string `json:"from" jsonschema:"Issue key on the active side of the link. For type=Blocks, 'from' is the issue that does the blocking."`
+	To      string `json:"to" jsonschema:"Issue key on the passive side of the link. For type=Blocks, 'to' is the issue that is blocked."`
+	Comment string `json:"comment,omitempty" jsonschema:"Optional Markdown comment posted on the inward issue at link creation time. Wiki-markup is not supported here; for wiki, post a separate comment action after the link is created."`
+}
+
+// UnlinkItem is one entry in WriteItem.Unlinks. Either LinkID (preferred)
+// or all of Type + From + To — when the triple is given, the server
+// resolves the link by reading issuelinks on the active issue.
+type UnlinkItem struct {
+	LinkID string `json:"link_id,omitempty" jsonschema:"Existing link ID. Preferred — read from the issuelinks field of jira_read for unambiguous removal."`
+	Type   string `json:"type,omitempty" jsonschema:"Link type name (e.g. Blocks). Required when link_id is not provided."`
+	From   string `json:"from,omitempty" jsonschema:"Issue key on the active side. Required when link_id is not provided."`
+	To     string `json:"to,omitempty" jsonschema:"Issue key on the passive side. Required when link_id is not provided."`
 }
 
 type WriteItem struct {
@@ -49,8 +56,8 @@ type WriteItem struct {
 
 	FieldsJSON string `json:"fields_json,omitempty" jsonschema:"Raw JSON object merged into issue fields. Escape hatch for custom fields."`
 
-	Links   []LinkItem `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
-	Unlinks []LinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue. comment is ignored on unlinks."`
+	Links   []LinkItem   `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
+	Unlinks []UnlinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue."`
 }
 
 type WriteArgs struct {
@@ -78,12 +85,6 @@ Creating issues:
 - Pass custom fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
 - If the issue type is invalid for the project, the error lists available types.
 
-Linking issues:
-- links creates new issue links. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names and verb directions. 'from' is always the active side (e.g. for type=Blocks, 'from' blocks 'to'). Optional Markdown comment posts a comment on the inward issue at link time; for wiki-markup, post a separate comment action after the link is created.
-- unlinks removes links. Each entry needs link_id OR (type, from, to). When the triple is provided, the server resolves the link by reading issuelinks on the active issue.
-- parent_key sets the parent issue (e.g. an Epic for a sub-task). Available on create and update. Jira enforces parent-type compatibility per project configuration.
-- Labels still use the read-then-write replace-list pattern; link operations are targeted.
-
 All actions support dry_run=true to preview without executing.
 
 Descriptions and comments expect Markdown by default and are converted to ADF via the v3 API. Do not round-trip a jira_read result straight into jira_write — old issues return legacy Jira wiki-markup, which is not Markdown. Wiki-markup tokens ({code}, {{inline}}, h1., etc.) are detected and rejected on the default path. To send wiki-markup deliberately, set description_format="wiki" or comment_format="wiki" — the write is then routed through the v2 API with the raw string.`,
@@ -92,37 +93,31 @@ Descriptions and comments expect Markdown by default and are converted to ADF vi
 // linkDirection encodes which side of a link the active issue plays.
 //   - linkOutward: active key sits on the From (outward, active) side.
 //   - linkInward:  active key sits on the To (inward, passive) side.
-type linkDirection int
+type linkDirection string
 
 const (
-	linkOutward linkDirection = iota
-	linkInward
+	linkOutward linkDirection = "outward"
+	linkInward  linkDirection = "inward"
 )
 
-// arrow renders the link as "from → to (type)" — used in success and
-// error messages on the links path.
 func (li LinkItem) arrow() string {
 	return fmt.Sprintf("%s → %s (%s)", li.From, li.To, li.Type)
 }
 
-// triple renders the link as "(from / type / to)" — used in unlink
-// messages where directionality is implied by surrounding text.
-func (li LinkItem) triple() string {
-	return fmt.Sprintf("(%s / %s / %s)", li.From, li.Type, li.To)
+func (u UnlinkItem) triple() string {
+	return fmt.Sprintf("(%s / %s / %s)", u.From, u.Type, u.To)
 }
 
-// resolveUnlinkDirection determines which side of li the activeKey plays.
-// Returns the direction and the "other" key. ok is false when activeKey
-// matches neither From nor To, in which case the caller should surface a
-// pass-link_id-explicitly error.
-func resolveUnlinkDirection(activeKey string, li LinkItem) (dir linkDirection, otherKey string, ok bool) {
+// resolveUnlinkDirection returns ok=false when activeKey matches neither
+// From nor To — callers should then surface a pass-link_id-explicitly error.
+func resolveUnlinkDirection(activeKey string, u UnlinkItem) (dir linkDirection, otherKey string, ok bool) {
 	switch activeKey {
-	case li.From:
-		return linkOutward, li.To, true
-	case li.To:
-		return linkInward, li.From, true
+	case u.From:
+		return linkOutward, u.To, true
+	case u.To:
+		return linkInward, u.From, true
 	default:
-		return 0, "", false
+		return "", "", false
 	}
 }
 
@@ -165,33 +160,30 @@ func (h *handlers) resolveLinkID(ctx context.Context, activeKey, linkType, other
 	}
 }
 
-// applyUnlinks removes each link in items. When LinkID is empty, the
-// helper resolves it from the (Type, From, To) triple by reading the
-// active issue's issuelinks. activeKey must equal exactly one of From/To
-// to determine direction. Comment is ignored with a warning. dryRun
-// makes zero state-reading calls.
-func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []LinkItem, dryRun bool) []string {
+// applyUnlinks deletes each entry, resolving LinkID from the (Type, From, To)
+// triple when not supplied. dryRun makes zero state-reading calls.
+func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []UnlinkItem, dryRun bool) []string {
 	out := make([]string, 0, len(items))
-	for _, li := range items {
+	for _, u := range items {
 		if dryRun {
-			if li.LinkID != "" {
-				out = append(out, fmt.Sprintf("  Would unlink link %s.", li.LinkID))
+			if u.LinkID != "" {
+				out = append(out, fmt.Sprintf("  Would unlink link %s.", u.LinkID))
 			} else {
-				out = append(out, fmt.Sprintf("  Would unlink %s — link_id resolved at apply time.", li.triple()))
+				out = append(out, fmt.Sprintf("  Would unlink %s — link_id resolved at apply time.", u.triple()))
 			}
 			continue
 		}
 
-		linkID := li.LinkID
+		linkID := u.LinkID
 		if linkID == "" {
-			dir, otherKey, ok := resolveUnlinkDirection(activeKey, li)
+			dir, otherKey, ok := resolveUnlinkDirection(activeKey, u)
 			if !ok {
-				out = append(out, fmt.Sprintf("  ERROR: unlink %s: active issue %s is on neither side of the link — pass link_id explicitly", li.triple(), activeKey))
+				out = append(out, fmt.Sprintf("  ERROR: unlink %s: active issue %s is on neither side of the link — pass link_id explicitly", u.triple(), activeKey))
 				continue
 			}
-			id, err := h.resolveLinkID(ctx, activeKey, li.Type, otherKey, dir)
+			id, err := h.resolveLinkID(ctx, activeKey, u.Type, otherKey, dir)
 			if err != nil {
-				out = append(out, fmt.Sprintf("  ERROR: unlink %s: %v", li.triple(), err))
+				out = append(out, fmt.Sprintf("  ERROR: unlink %s: %v", u.triple(), err))
 				continue
 			}
 			linkID = id
@@ -202,18 +194,13 @@ func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []L
 			continue
 		}
 
-		line := fmt.Sprintf("  Unlinked link %s.", linkID)
-		if li.Comment != "" {
-			line += " (comment ignored on unlinks)"
-		}
-		out = append(out, line)
+		out = append(out, fmt.Sprintf("  Unlinked link %s.", linkID))
 	}
 	return out
 }
 
-// applyLinks creates each link in items in order. Per-entry errors are
-// collected and formatted as result lines; never short-circuits.
-// Each LinkItem maps to a CreateIssueLinkInput as From=outward, To=inward.
+// applyLinks maps each LinkItem to a CreateIssueLinkInput as
+// From=outward, To=inward. Per-entry errors are collected; never short-circuits.
 func (h *handlers) applyLinks(ctx context.Context, items []LinkItem, dryRun bool) []string {
 	out := make([]string, 0, len(items))
 	for _, li := range items {
@@ -244,29 +231,28 @@ func (h *handlers) applyLinks(ctx context.Context, items []LinkItem, dryRun bool
 	return out
 }
 
-// validateLinkItems performs static checks on a slice of LinkItem entries.
-// isUnlink toggles the rule set: links require Type+From+To, unlinks require
-// LinkID OR Type+From+To. Self-links are always rejected.
-func validateLinkItems(items []LinkItem, isUnlink bool) error {
-	what := "links"
-	if isUnlink {
-		what = "unlinks"
-	}
+func validateLinks(items []LinkItem) error {
 	for i, li := range items {
-		if isUnlink {
-			if li.LinkID == "" && (li.Type == "" || li.From == "" || li.To == "") {
-				return fmt.Errorf("%s[%d]: provide link_id or all of (type, from, to) to identify the link", what, i)
-			}
-		} else {
-			if li.Type == "" {
-				return fmt.Errorf("%s[%d]: type is required (e.g. Blocks). Use jira_schema resource=link_types to discover valid names", what, i)
-			}
-			if li.From == "" || li.To == "" {
-				return fmt.Errorf("%s[%d]: from and to are required and must be issue keys", what, i)
-			}
+		if li.Type == "" {
+			return fmt.Errorf("links[%d]: type is required (e.g. Blocks). Use jira_schema resource=link_types to discover valid names", i)
 		}
-		if li.From != "" && li.To != "" && li.From == li.To {
-			return fmt.Errorf("%s[%d]: cannot link an issue to itself (from=%s to=%s)", what, i, li.From, li.To)
+		if li.From == "" || li.To == "" {
+			return fmt.Errorf("links[%d]: from and to are required and must be issue keys", i)
+		}
+		if li.From == li.To {
+			return fmt.Errorf("links[%d]: cannot link an issue to itself (from=%s to=%s)", i, li.From, li.To)
+		}
+	}
+	return nil
+}
+
+func validateUnlinks(items []UnlinkItem) error {
+	for i, u := range items {
+		if u.LinkID == "" && (u.Type == "" || u.From == "" || u.To == "") {
+			return fmt.Errorf("unlinks[%d]: provide link_id or all of (type, from, to) to identify the link", i)
+		}
+		if u.From != "" && u.To != "" && u.From == u.To {
+			return fmt.Errorf("unlinks[%d]: cannot link an issue to itself (from=%s to=%s)", i, u.From, u.To)
 		}
 	}
 	return nil
@@ -562,7 +548,7 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 	if len(item.Unlinks) > 0 {
 		return "", fmt.Errorf("unlinks not valid on action=create — nothing to unlink. Use action=update on an existing issue")
 	}
-	if err := validateLinkItems(item.Links, false); err != nil {
+	if err := validateLinks(item.Links); err != nil {
 		return "", err
 	}
 
@@ -698,10 +684,10 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool)
 	if item.Key == "" {
 		return "", fmt.Errorf("update requires key")
 	}
-	if err := validateLinkItems(item.Links, false); err != nil {
+	if err := validateLinks(item.Links); err != nil {
 		return "", err
 	}
-	if err := validateLinkItems(item.Unlinks, true); err != nil {
+	if err := validateUnlinks(item.Unlinks); err != nil {
 		return "", err
 	}
 

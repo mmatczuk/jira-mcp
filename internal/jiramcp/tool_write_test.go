@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
 
 	gojira "github.com/andygrunwald/go-jira"
@@ -161,9 +160,9 @@ func TestWriteTool_FormatEnums(t *testing.T) {
 }
 
 // TestWriteTool_LinkItemHasNoCommentFormat guards the deliberate omission
-// of comment_format on LinkItem: the link endpoint only accepts ADF, so
-// surfacing a markdown/wiki enum would only invite the LLM to set "wiki"
-// and hit a runtime rejection. Markdown-only is the contract.
+// of comment_format on LinkItem/UnlinkItem: the link endpoint only accepts
+// ADF, so surfacing a markdown/wiki enum would only invite the LLM to set
+// "wiki" and hit a runtime rejection. Markdown-only is the contract.
 func TestWriteTool_LinkItemHasNoCommentFormat(t *testing.T) {
 	schema, ok := writeTool.InputSchema.(*jsonschema.Schema)
 	require.True(t, ok)
@@ -183,10 +182,11 @@ func TestWriteTool_LinkItemHasNoCommentFormat(t *testing.T) {
 }
 
 // TestWriteToolDescription_MentionsLinks guards the load-bearing tool
-// description: links, unlinks, parent_key, and link_types must all appear
-// so the LLM has guidance from the tool listing alone.
+// description: links, unlinks, and parent_key must appear in the action
+// bullets so the LLM has guidance from the tool listing alone. (link_types
+// is documented inline on the Links jsonschema field.)
 func TestWriteToolDescription_MentionsLinks(t *testing.T) {
-	for _, want := range []string{"links", "unlinks", "parent_key", "link_types"} {
+	for _, want := range []string{"links", "unlinks", "parent_key"} {
 		assert.Contains(t, writeTool.Description, want)
 	}
 }
@@ -372,7 +372,7 @@ func TestHandleWrite_Create_RejectsUnlinks(t *testing.T) {
 			Project:   "PROJ",
 			Summary:   "s",
 			IssueType: "Task",
-			Unlinks:   []LinkItem{{LinkID: "1"}},
+			Unlinks:   []UnlinkItem{{LinkID: "1"}},
 		}},
 	})
 	assert.Contains(t, text, "ERROR")
@@ -432,7 +432,7 @@ func TestHandleWrite_Unlinks_NoLinkIDOrTriple_Rejected(t *testing.T) {
 		Action: "update",
 		Items: []WriteItem{{
 			Key:     "PROJ-1",
-			Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-1"}}, // missing To and LinkID
+			Unlinks: []UnlinkItem{{Type: "Blocks", From: "PROJ-1"}}, // missing To and LinkID
 		}},
 	})
 	assert.Contains(t, text, "ERROR")
@@ -800,7 +800,7 @@ func TestApplyUnlinks_ByLinkID(t *testing.T) {
 		},
 	}
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []UnlinkItem{
 		{LinkID: "10042"},
 	}, false)
 	require.Len(t, lines, 1)
@@ -822,7 +822,7 @@ func TestApplyUnlinks_ByTriple(t *testing.T) {
 		},
 	}
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []UnlinkItem{
 		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
 	}, false)
 	require.Len(t, lines, 1)
@@ -847,7 +847,7 @@ func TestApplyUnlinks_ByTriple_InwardDirection(t *testing.T) {
 		},
 	}
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-2", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-2", []UnlinkItem{
 		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
 	}, false)
 
@@ -859,7 +859,7 @@ func TestApplyUnlinks_ByTriple_InwardDirection(t *testing.T) {
 func TestApplyUnlinks_ByTriple_NeitherSide_ErrorsWithoutGetIssue(t *testing.T) {
 	mc := &mockClient{} // any API call panics: no GetIssue, no DeleteIssueLink.
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-99", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-99", []UnlinkItem{
 		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
 	}, false)
 	require.Len(t, lines, 1)
@@ -879,7 +879,7 @@ func TestApplyUnlinks_PartialFailure(t *testing.T) {
 		},
 	}
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []UnlinkItem{
 		{LinkID: "10"},
 		{LinkID: "20"},
 		{LinkID: "30"},
@@ -895,31 +895,13 @@ func TestApplyUnlinks_PartialFailure(t *testing.T) {
 func TestApplyUnlinks_DryRun_NoGetIssue(t *testing.T) {
 	mc := &mockClient{} // any API call panics
 	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
+	lines := h.applyUnlinks(context.Background(), "PROJ-1", []UnlinkItem{
 		{LinkID: "10042"},
 		{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
 	}, true)
 	require.Len(t, lines, 2)
 	assert.Contains(t, lines[0], "Would unlink link 10042")
 	assert.Contains(t, lines[1], "Would unlink (PROJ-1 / Blocks / PROJ-2) — link_id resolved at apply time")
-}
-
-func TestApplyUnlinks_CommentIgnoredWithWarning(t *testing.T) {
-	mc := &mockClient{
-		DeleteIssueLinkFn: func(_ context.Context, _ string) error { return nil },
-	}
-	h := newWriteHandlers(mc)
-	lines := h.applyUnlinks(context.Background(), "PROJ-1", []LinkItem{
-		{LinkID: "10042", Comment: "ignored"},
-	}, false)
-	require.Len(t, lines, 1)
-	// Either an inline warning or a separate line; require either.
-	joined := lines[0]
-	assert.True(t,
-		strings.Contains(joined, "comment ignored") ||
-			strings.Contains(joined, "comment is ignored"),
-		"expected a warning that comment is ignored on unlink, got: %s", joined,
-	)
 }
 
 // --- end-to-end batch coverage ---
@@ -970,7 +952,7 @@ func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
 			},
 			{
 				Key:     "PROJ-3",
-				Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-3", To: "PROJ-9"}},
+				Unlinks: []UnlinkItem{{Type: "Blocks", From: "PROJ-3", To: "PROJ-9"}},
 			},
 		},
 	})
@@ -1006,7 +988,7 @@ func TestHandleWrite_Update_WithUnlinksByLinkID(t *testing.T) {
 		Items: []WriteItem{{
 			Key:     "PROJ-1",
 			Summary: "new",
-			Unlinks: []LinkItem{{LinkID: "10042"}},
+			Unlinks: []UnlinkItem{{LinkID: "10042"}},
 		}},
 	})
 	assert.Equal(t, "10042", deleted)
@@ -1032,7 +1014,7 @@ func TestHandleWrite_Update_WithUnlinksByTriple(t *testing.T) {
 		Items: []WriteItem{{
 			Key:     "PROJ-1",
 			Summary: "x",
-			Unlinks: []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+			Unlinks: []UnlinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
 		}},
 	})
 	assert.Equal(t, "10042", deleted)
@@ -1106,7 +1088,7 @@ func TestHandleWrite_Update_UnlinksThenLinks_Order(t *testing.T) {
 			Key:     "PROJ-1",
 			Summary: "x",
 			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-3"}},
-			Unlinks: []LinkItem{{LinkID: "10042"}},
+			Unlinks: []UnlinkItem{{LinkID: "10042"}},
 		}},
 	})
 	assert.Equal(t, []string{"delete", "create"}, order, "unlinks before links")
@@ -1146,7 +1128,7 @@ func TestHandleWrite_Update_DryRun_LinksAndUnlinksInPreview(t *testing.T) {
 			Key:     "PROJ-1",
 			Summary: "x",
 			Links:   []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-3"}},
-			Unlinks: []LinkItem{
+			Unlinks: []UnlinkItem{
 				{LinkID: "10042"},
 				{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"},
 			},
