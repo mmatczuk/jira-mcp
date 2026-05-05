@@ -230,6 +230,240 @@ func TestToADF_HardLineBreak(t *testing.T) {
 	assert.True(t, found, "expected a hardBreak node")
 }
 
+func TestToADF_SoftLineBreak(t *testing.T) {
+	// Single newline inside a paragraph = soft line break. ADF has no soft
+	// break primitive; the converter emits hardBreak so authored newlines
+	// survive round-trip through Jira instead of silently collapsing.
+	result := ToADF("line one\nline two")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+
+	first := inlines[0].(node)
+	assert.Equal(t, "text", first["type"])
+	assert.Equal(t, "line one", first["text"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+
+	last := inlines[2].(node)
+	assert.Equal(t, "text", last["type"])
+	assert.Equal(t, "line two", last["text"])
+}
+
+func TestToADF_BoldFollowedBySoftBreak(t *testing.T) {
+	// Pins the original bug: "**Header**\ntext" rendered as "Headertext"
+	// because the soft break between the closing emphasis and the trailing
+	// text was dropped. The strong mark must stay on "Header" only and must
+	// not be applied to the hardBreak.
+	result := ToADF("**Context**\nThe CHECK MOTOR feature flag.")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.GreaterOrEqual(t, len(inlines), 3)
+
+	bold := inlines[0].(node)
+	assert.Equal(t, "text", bold["type"])
+	assert.Equal(t, "Context", bold["text"])
+	boldMarks := bold["marks"].([]any)
+	require.Len(t, boldMarks, 1)
+	assert.Equal(t, "strong", boldMarks[0].(node)["type"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+	_, hasMarks := br["marks"]
+	assert.False(t, hasMarks, "hardBreak must not carry marks")
+
+	var trailing string
+	for _, inline := range inlines[2:] {
+		n := inline.(node)
+		assert.Equal(t, "text", n["type"])
+		if marks, ok := n["marks"]; ok {
+			for _, mark := range marks.([]any) {
+				assert.NotEqual(t, "strong", mark.(node)["type"],
+					"text after soft break must not inherit strong mark")
+			}
+		}
+		if s, ok := n["text"].(string); ok {
+			trailing += s
+		}
+	}
+	assert.Equal(t, "The CHECK MOTOR feature flag.", trailing)
+}
+
+func TestToADF_SoftBreakBetweenEmphasis(t *testing.T) {
+	// Soft break between two bold runs: each run keeps its strong mark, the
+	// hardBreak between them carries no marks.
+	result := ToADF("**a**\n**b**")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+
+	a := inlines[0].(node)
+	assert.Equal(t, "text", a["type"])
+	assert.Equal(t, "a", a["text"])
+	aMarks := a["marks"].([]any)
+	require.Len(t, aMarks, 1)
+	assert.Equal(t, "strong", aMarks[0].(node)["type"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+	_, hasMarks := br["marks"]
+	assert.False(t, hasMarks)
+
+	b := inlines[2].(node)
+	assert.Equal(t, "text", b["type"])
+	assert.Equal(t, "b", b["text"])
+	bMarks := b["marks"].([]any)
+	require.Len(t, bMarks, 1)
+	assert.Equal(t, "strong", bMarks[0].(node)["type"])
+}
+
+func TestToADF_EmphasisSpanningSoftBreak(t *testing.T) {
+	// Italic that spans a soft break. Goldmark places the soft-break flag on
+	// the first inner Text, so a hardBreak is emitted inside the Emphasis
+	// subtree. The em mark must apply to the text nodes only, never to the
+	// hardBreak — ADF rejects marks on hardBreak nodes.
+	result := ToADF("*line one\nline two*")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+
+	first := inlines[0].(node)
+	assert.Equal(t, "text", first["type"])
+	assert.Equal(t, "line one", first["text"])
+	firstMarks := first["marks"].([]any)
+	require.Len(t, firstMarks, 1)
+	assert.Equal(t, "em", firstMarks[0].(node)["type"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+	_, hasMarks := br["marks"]
+	assert.False(t, hasMarks, "hardBreak inside emphasis must not carry em mark")
+
+	last := inlines[2].(node)
+	assert.Equal(t, "text", last["type"])
+	assert.Equal(t, "line two", last["text"])
+	lastMarks := last["marks"].([]any)
+	require.Len(t, lastMarks, 1)
+	assert.Equal(t, "em", lastMarks[0].(node)["type"])
+}
+
+func TestToADF_StrongSpanningSoftBreak(t *testing.T) {
+	// Same as the em test but with double-asterisk strong.
+	result := ToADF("**line one\nline two**")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+
+	first := inlines[0].(node)
+	assert.Equal(t, "text", first["type"])
+	firstMarks := first["marks"].([]any)
+	require.Len(t, firstMarks, 1)
+	assert.Equal(t, "strong", firstMarks[0].(node)["type"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+	_, hasMarks := br["marks"]
+	assert.False(t, hasMarks, "hardBreak inside strong must not carry strong mark")
+
+	last := inlines[2].(node)
+	assert.Equal(t, "text", last["type"])
+	lastMarks := last["marks"].([]any)
+	require.Len(t, lastMarks, 1)
+	assert.Equal(t, "strong", lastMarks[0].(node)["type"])
+}
+
+func TestToADF_LinkSpanningSoftBreak(t *testing.T) {
+	// Link whose label wraps across a soft break — the hardBreak ends up
+	// inside the Link subtree. The link mark must apply to text nodes only.
+	result := ToADF("[line one\nline two](https://example.com)")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	para := content[0].(node)
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+
+	first := inlines[0].(node)
+	assert.Equal(t, "text", first["type"])
+	firstMarks := first["marks"].([]any)
+	require.Len(t, firstMarks, 1)
+	firstMark := firstMarks[0].(node)
+	assert.Equal(t, "link", firstMark["type"])
+	assert.Equal(t, "https://example.com", firstMark["attrs"].(node)["href"])
+
+	br := inlines[1].(node)
+	assert.Equal(t, "hardBreak", br["type"])
+	_, hasMarks := br["marks"]
+	assert.False(t, hasMarks, "hardBreak inside link must not carry link mark")
+
+	last := inlines[2].(node)
+	assert.Equal(t, "text", last["type"])
+	lastMarks := last["marks"].([]any)
+	require.Len(t, lastMarks, 1)
+	assert.Equal(t, "link", lastMarks[0].(node)["type"])
+}
+
+func TestToADF_SoftBreakInsideListItem(t *testing.T) {
+	// List item with a lazy continuation line. The soft break must produce
+	// a hardBreak inside the list item's paragraph.
+	result := ToADF("- line one\n  line two\n- item two")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	list := content[0].(node)
+	assert.Equal(t, "bulletList", list["type"])
+
+	items := list["content"].([]any)
+	require.Len(t, items, 2)
+
+	first := items[0].(node)
+	para := first["content"].([]any)[0].(node)
+	assert.Equal(t, "paragraph", para["type"])
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+	assert.Equal(t, "text", inlines[0].(node)["type"])
+	assert.Equal(t, "line one", inlines[0].(node)["text"])
+	assert.Equal(t, "hardBreak", inlines[1].(node)["type"])
+	assert.Equal(t, "text", inlines[2].(node)["type"])
+	assert.Equal(t, "line two", inlines[2].(node)["text"])
+}
+
+func TestToADF_SoftBreakInsideBlockquote(t *testing.T) {
+	// Blockquote whose body wraps across two lines.
+	result := ToADF("> line one\n> line two")
+	require.NotNil(t, result)
+
+	content := result["content"].([]any)
+	bq := content[0].(node)
+	assert.Equal(t, "blockquote", bq["type"])
+
+	para := bq["content"].([]any)[0].(node)
+	assert.Equal(t, "paragraph", para["type"])
+	inlines := para["content"].([]any)
+	require.Len(t, inlines, 3)
+	assert.Equal(t, "text", inlines[0].(node)["type"])
+	assert.Equal(t, "line one", inlines[0].(node)["text"])
+	assert.Equal(t, "hardBreak", inlines[1].(node)["type"])
+	assert.Equal(t, "text", inlines[2].(node)["type"])
+	assert.Equal(t, "line two", inlines[2].(node)["text"])
+}
+
 func TestToADF_AutoLink(t *testing.T) {
 	result := ToADF("<https://example.com>")
 	require.NotNil(t, result)

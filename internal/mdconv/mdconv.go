@@ -209,14 +209,18 @@ func convertInline(n ast.Node, source []byte) []any {
 	switch n := n.(type) {
 	case *ast.Text:
 		t := string(n.Segment.Value(source))
-		if t == "" && !n.HardLineBreak() {
+		// ADF has no soft-break primitive. Treating soft breaks as hardBreak
+		// preserves authored newlines through the round-trip; the alternative
+		// (silently dropping them) glues adjacent inline runs together.
+		isBreak := n.HardLineBreak() || n.SoftLineBreak()
+		if t == "" && !isBreak {
 			return nil
 		}
 		var result []any
 		if t != "" {
 			result = append(result, node{"type": "text", "text": t})
 		}
-		if n.HardLineBreak() {
+		if isBreak {
 			result = append(result, node{"type": "hardBreak"})
 		}
 		return result
@@ -249,7 +253,7 @@ func convertInline(n ast.Node, source []byte) []any {
 		children := convertInlineChildren(n, source)
 		for _, child := range children {
 			m, ok := child.(node)
-			if !ok {
+			if !ok || !isTextNode(m) {
 				continue
 			}
 			marks, _ := m["marks"].([]any)
@@ -266,14 +270,16 @@ func convertInline(n ast.Node, source []byte) []any {
 	case *ast.Link:
 		children := convertInlineChildren(n, source)
 		for _, child := range children {
-			if m, ok := child.(node); ok {
-				marks, _ := m["marks"].([]any)
-				marks = append(marks, node{
-					"type":  "link",
-					"attrs": node{"href": string(n.Destination)},
-				})
-				m["marks"] = marks
+			m, ok := child.(node)
+			if !ok || !isTextNode(m) {
+				continue
 			}
+			marks, _ := m["marks"].([]any)
+			marks = append(marks, node{
+				"type":  "link",
+				"attrs": node{"href": string(n.Destination)},
+			})
+			m["marks"] = marks
 		}
 		return children
 
@@ -308,6 +314,14 @@ func convertInline(n ast.Node, source []byte) []any {
 	default:
 		return convertInlineChildren(n, source)
 	}
+}
+
+// isTextNode reports whether m is an ADF text node. Marks (em, strong, code,
+// link) are only valid on text nodes; emphasis and link traversal must not
+// attach marks to e.g. an emitted hardBreak.
+func isTextNode(m node) bool {
+	t, _ := m["type"].(string)
+	return t == "text"
 }
 
 // hasCodeMark reports whether marks already contains a mark of type "code".
