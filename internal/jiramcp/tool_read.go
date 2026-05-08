@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mmatczuk/jira-mcp/internal/jira"
+	"github.com/mmatczuk/jira-mcp/internal/mdconv"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,6 +31,8 @@ type ReadArgs struct {
 	Limit         int    `json:"limit,omitempty" jsonschema:"Max results to return. Default 100."`
 	StartAt       int    `json:"start_at,omitempty" jsonschema:"Pagination offset for resource listings (boards, sprints). Not used for JQL search."`
 	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Token for fetching the next page of JQL search results. Returned in previous search response."`
+
+	FieldFormat string `json:"field_format,omitempty" jsonschema:"How to render ADF rich-text custom fields in the response. raw (default): ADF objects passed through. markdown: ADF rich-text fields (schema_custom ending in :textarea) are converted to Markdown server-side. Allowed: raw, markdown."`
 }
 
 var readTool = &mcp.Tool{
@@ -40,7 +43,8 @@ var readTool = &mcp.Tool{
 2. jql — Search issues with JQL query. Supports all JIRA JQL syntax.
 3. resource — List a resource type: "projects", "boards", "sprints" (needs board_id), "sprint_issues" (needs sprint_id).
 
-Common options: fields (comma-separated), expand, limit (default 100), start_at.
+Common options: fields (comma-separated), expand, limit (default 100), start_at, field_format.
+field_format=markdown converts ADF rich-text custom fields (jira_schema reports content_format="adf") to Markdown server-side. Default raw passes ADF through unchanged.
 Hint: Use jira_schema resource=transitions with an issue_key to find valid transition IDs before transitioning.
 
 Descriptions and comments for older issues are returned in Jira wiki-markup, not Markdown. Do not feed a description/comment string from jira_read straight back into jira_write — the default write path expects Markdown and will reject recognised wiki-markup tokens. Either convert to Markdown, or set description_format="wiki" / comment_format="wiki" on the write to preserve wiki-markup input.`,
@@ -49,6 +53,12 @@ Descriptions and comments for older issues are returned in Jira wiki-markup, not
 func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args ReadArgs) (*mcp.CallToolResult, any, error) {
 	if args.Limit == 0 {
 		args.Limit = 100
+	}
+
+	switch args.FieldFormat {
+	case "", "raw", "markdown":
+	default:
+		return textResult(fmt.Sprintf("Invalid field_format %q. Allowed: raw, markdown.", args.FieldFormat), true), nil, nil
 	}
 
 	modes := 0
@@ -79,6 +89,40 @@ func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args 
 	}
 }
 
+// customFieldRenderer transforms a custom-field value before it lands in the
+// response. nil means "pass through unchanged" — the raw default.
+type customFieldRenderer func(fieldID string, value any) any
+
+// newCustomFieldRenderer returns the renderer for the requested FieldFormat.
+// nil for raw mode means zero schema lookups during the read. The markdown
+// renderer converts ADF rich-text custom fields via FromADF; everything
+// else (unknown fields, non-textarea fields, non-doc values) passes through
+// rather than blocking the read.
+func (h *handlers) newCustomFieldRenderer(ctx context.Context, args ReadArgs) customFieldRenderer {
+	if args.FieldFormat != "markdown" {
+		return nil
+	}
+	cache := newFieldSchemaCache(h.client)
+	return func(fieldID string, value any) any {
+		schema, err := cache.get(ctx, fieldID)
+		if err != nil || !isADFRichText(schema) {
+			return value
+		}
+		doc, ok := value.(map[string]any)
+		if !ok {
+			return value
+		}
+		if t, _ := doc["type"].(string); t != "doc" {
+			return value
+		}
+		md, err := mdconv.FromADF(doc)
+		if err != nil {
+			return value
+		}
+		return strings.TrimRight(md, "\n")
+	}
+}
+
 func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolResult {
 	// For a single key use GetIssue (supports Expand, richer fields).
 	// For 2+ keys use a JQL search to reduce API calls.
@@ -94,7 +138,8 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		if err != nil {
 			return formatReadResult("Fetched 0 issue(s)", nil, []string{fmt.Sprintf("%s: %v", args.Keys[0], err)})
 		}
-		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue)}, nil)
+		render := h.newCustomFieldRenderer(ctx, args)
+		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, render)}, nil)
 	}
 
 	// Build issueKey in (...) JQL for multi-key fetch.
@@ -119,9 +164,10 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		return textResult(fmt.Sprintf("Failed to fetch issues %v: %v", args.Keys, err), true)
 	}
 
+	render := h.newCustomFieldRenderer(ctx, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i]))
+		results = append(results, issueToMap(&sr.Issues[i], render))
 	}
 	return formatReadResult(fmt.Sprintf("Fetched %d issue(s)", len(results)), results, nil)
 }
@@ -145,9 +191,10 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 		return textResult(fmt.Sprintf("JQL search failed: %v\nHint: Check your JQL syntax. Use jira_schema resource=fields to see available field names.", err), true)
 	}
 
+	render := h.newCustomFieldRenderer(ctx, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i]))
+		results = append(results, issueToMap(&sr.Issues[i], render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) (total %d). JQL: %s", len(results), sr.Total, args.JQL)
@@ -279,9 +326,10 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 		return textResult(fmt.Sprintf("Failed to get issues for sprint %d: %v", args.SprintID, err), true)
 	}
 
+	render := h.newCustomFieldRenderer(ctx, args)
 	var results []map[string]any
 	for i := range issues {
-		results = append(results, issueToMap(&issues[i]))
+		results = append(results, issueToMap(&issues[i], render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) in sprint %d", len(results), args.SprintID)
@@ -297,7 +345,7 @@ func userToMap(u *jira.User) map[string]any {
 	}
 }
 
-func issueToMap(issue *jira.Issue) map[string]any {
+func issueToMap(issue *jira.Issue, render customFieldRenderer) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
 		"id":   issue.ID,
@@ -332,11 +380,26 @@ func issueToMap(issue *jira.Issue) map[string]any {
 		if !time.Time(issue.Fields.Updated).IsZero() {
 			fields["updated"] = time.Time(issue.Fields.Updated).Format(time.RFC3339)
 		}
+		for k, v := range issue.Fields.Unknowns {
+			if !strings.HasPrefix(k, customFieldPrefix) {
+				continue
+			}
+			if render != nil {
+				v = render(k, v)
+			}
+			fields[k] = v
+		}
 		m["fields"] = fields
 	}
 
 	return m
 }
+
+// customFieldPrefix marks a Jira custom-field ID. Jira encodes every custom
+// field as `customfield_<id>` in API responses; the typed go-jira struct
+// ignores them, so they land in IssueFields.Unknowns and we surface only
+// those keys to MCP callers.
+const customFieldPrefix = "customfield_"
 
 func formatReadResult(summary string, results []map[string]any, errors []string) *mcp.CallToolResult {
 	out := summary + "\n\n"

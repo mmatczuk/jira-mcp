@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	gojira "github.com/andygrunwald/go-jira"
@@ -189,6 +190,215 @@ func TestWriteToolDescription_MentionsLinks(t *testing.T) {
 	for _, want := range []string{"links", "unlinks", "parent_key"} {
 		assert.Contains(t, writeTool.Description, want)
 	}
+}
+
+// --- custom_fields_markdown ---
+
+const textareaTypeKey = "com.atlassian.jira.plugin.system.customfieldtypes:textarea"
+
+// fieldsCatalogue builds a GetFieldsFn that returns the supplied fields.
+// Default schema for any custom field is :textarea unless overridden in fs.
+func fieldsCatalogue(fs ...jira.Field) func(context.Context) ([]jira.Field, error) {
+	return func(context.Context) ([]jira.Field, error) {
+		out := make([]jira.Field, len(fs))
+		copy(out, fs)
+		return out, nil
+	}
+}
+
+func TestWrite_CustomFieldsMarkdown_Update_ConvertsToADF(t *testing.T) {
+	var captured map[string]any
+	mc := &mockClient{
+		GetFieldsFn: fieldsCatalogue(jira.Field{
+			ID: "customfield_10001", Schema: jira.FieldSchema{Type: "string", Custom: textareaTypeKey},
+		}),
+		UpdateIssueV3Fn: func(_ context.Context, _ string, payload map[string]any) error {
+			captured = payload
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:                  "PROJ-1",
+			CustomFieldsMarkdown: map[string]string{"customfield_10001": "**bold** body"},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+
+	fields := captured["fields"].(map[string]any)
+	adf, ok := fields["customfield_10001"].(map[string]any)
+	require.True(t, ok, "customfield_10001 should be an ADF object")
+	assert.Equal(t, "doc", adf["type"])
+}
+
+func TestWrite_CustomFieldsMarkdown_Create_ConvertsToADF(t *testing.T) {
+	var captured map[string]any
+	mc := &mockClient{
+		GetFieldsFn: fieldsCatalogue(jira.Field{
+			ID: "customfield_10001", Schema: jira.FieldSchema{Type: "string", Custom: textareaTypeKey},
+		}),
+		CreateIssueV3Fn: func(_ context.Context, payload map[string]any) (string, string, error) {
+			captured = payload
+			return "PROJ-1", "10001", nil
+		},
+	}
+	withCreateMeta(mc, "Task")
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "create",
+		Items: []WriteItem{{
+			Project:              "PROJ",
+			Summary:              "Test",
+			IssueType:            "Task",
+			CustomFieldsMarkdown: map[string]string{"customfield_10001": "**bold**"},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Created PROJ-1")
+
+	fields := captured["fields"].(map[string]any)
+	adf, ok := fields["customfield_10001"].(map[string]any)
+	require.True(t, ok, "customfield_10001 should be an ADF object on create")
+	assert.Equal(t, "doc", adf["type"])
+}
+
+func TestWrite_CustomFieldsMarkdown_RejectsBadFields(t *testing.T) {
+	cases := []struct {
+		name        string
+		fields      []jira.Field
+		writeItem   WriteItem
+		wantInError string
+	}{
+		{
+			name: "non-textarea field is rejected",
+			fields: []jira.Field{
+				{ID: "customfield_50", Schema: jira.FieldSchema{
+					Type:   "string",
+					Custom: "com.atlassian.jira.plugin.system.customfieldtypes:textfield",
+				}},
+			},
+			writeItem: WriteItem{
+				Key:                  "K-1",
+				CustomFieldsMarkdown: map[string]string{"customfield_50": "**bold**"},
+			},
+			wantInError: "customfield_50",
+		},
+		{
+			name:   "unknown field surfaces a discovery hint",
+			fields: []jira.Field{},
+			writeItem: WriteItem{
+				Key:                  "K-1",
+				CustomFieldsMarkdown: map[string]string{"customfield_99": "x"},
+			},
+			wantInError: "jira_schema resource=fields",
+		},
+		{
+			name: "collision with fields_json is rejected before any write",
+			fields: []jira.Field{
+				{ID: "customfield_10001", Schema: jira.FieldSchema{Custom: textareaTypeKey}},
+			},
+			writeItem: WriteItem{
+				Key:                  "K-1",
+				FieldsJSON:           `{"customfield_10001": {"existing": true}}`,
+				CustomFieldsMarkdown: map[string]string{"customfield_10001": "x"},
+			},
+			wantInError: "customfield_10001",
+		},
+		{
+			name: "empty value does not bypass non-textarea rejection",
+			fields: []jira.Field{
+				{ID: "customfield_50", Schema: jira.FieldSchema{
+					Type:   "string",
+					Custom: "com.atlassian.jira.plugin.system.customfieldtypes:textfield",
+				}},
+			},
+			writeItem: WriteItem{
+				Key:                  "K-1",
+				CustomFieldsMarkdown: map[string]string{"customfield_50": ""},
+			},
+			wantInError: "customfield_50",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			updateCalled := false
+			mc := &mockClient{
+				GetFieldsFn: fieldsCatalogue(tc.fields...),
+				UpdateIssueV3Fn: func(context.Context, string, map[string]any) error {
+					updateCalled = true
+					return nil
+				},
+			}
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{Action: "update", Items: []WriteItem{tc.writeItem}})
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, tc.wantInError)
+			assert.False(t, updateCalled, "no write should be issued when validation fails")
+		})
+	}
+}
+
+func TestWrite_CustomFieldsMarkdown_EmptyClearsField(t *testing.T) {
+	var captured map[string]any
+	mc := &mockClient{
+		GetFieldsFn: fieldsCatalogue(jira.Field{
+			ID: "customfield_10001", Schema: jira.FieldSchema{Type: "string", Custom: textareaTypeKey},
+		}),
+		UpdateIssueV3Fn: func(_ context.Context, _ string, payload map[string]any) error {
+			captured = payload
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:                  "PROJ-1",
+			CustomFieldsMarkdown: map[string]string{"customfield_10001": ""},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+
+	require.NotNil(t, captured, "update must be issued for an explicit clear")
+	fields := captured["fields"].(map[string]any)
+	adf, ok := fields["customfield_10001"].(map[string]any)
+	require.True(t, ok, "customfield_10001 should be an ADF object on clear")
+	assert.Equal(t, "doc", adf["type"])
+	assert.Equal(t, 1, adf["version"])
+	content, ok := adf["content"].([]any)
+	require.True(t, ok, "ADF content must be a slice")
+	assert.Empty(t, content, "clear writes an empty ADF document")
+}
+
+func TestWrite_CustomFieldsMarkdown_BatchSharesCache(t *testing.T) {
+	var fieldsCalls, updateCalls atomic.Int32
+	mc := &mockClient{
+		GetFieldsFn: func(context.Context) ([]jira.Field, error) {
+			fieldsCalls.Add(1)
+			return []jira.Field{
+				{ID: "customfield_10001", Schema: jira.FieldSchema{Custom: textareaTypeKey}},
+			}, nil
+		},
+		UpdateIssueV3Fn: func(context.Context, string, map[string]any) error {
+			updateCalls.Add(1)
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{
+			{Key: "A-1", CustomFieldsMarkdown: map[string]string{"customfield_10001": "first"}},
+			{Key: "B-2", CustomFieldsMarkdown: map[string]string{"customfield_10001": "second"}},
+		},
+	})
+	assert.False(t, isErr)
+	assert.EqualValues(t, 2, updateCalls.Load(), "both items should be written")
+	assert.EqualValues(t, 1, fieldsCalls.Load(), "GetFields must be called once across the batch")
 }
 
 // --- handleWrite dispatch & validation ---

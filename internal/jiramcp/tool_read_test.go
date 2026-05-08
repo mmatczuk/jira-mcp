@@ -2,7 +2,10 @@ package jiramcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trivago/tgo/tcontainer"
 )
 
 func callRead(t *testing.T, h *handlers, args ReadArgs) (string, bool) {
@@ -375,7 +379,7 @@ func TestIssueToMap_AllFields(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue)
+	m := issueToMap(issue, nil)
 	assert.Equal(t, "PROJ-1", m["key"])
 	assert.Equal(t, "10001", m["id"])
 
@@ -393,10 +397,93 @@ func TestIssueToMap_AllFields(t *testing.T) {
 
 func TestIssueToMap_NilFields(t *testing.T) {
 	issue := &jira.Issue{Key: "X-1", ID: "1"}
-	m := issueToMap(issue)
+	m := issueToMap(issue, nil)
 	assert.Equal(t, "X-1", m["key"])
 	_, hasFields := m["fields"]
 	assert.False(t, hasFields)
+}
+
+// sampleADFDoc returns a minimal ADF doc carrying the given paragraph text.
+// Shared across tests that exercise customfield_* values shaped like ADF.
+func sampleADFDoc(text string) map[string]any {
+	return map[string]any{
+		"version": float64(1),
+		"type":    "doc",
+		"content": []any{
+			map[string]any{
+				"type":    "paragraph",
+				"content": []any{map[string]any{"type": "text", "text": text}},
+			},
+		},
+	}
+}
+
+func TestIssueToMap_IncludesCustomFields(t *testing.T) {
+	adfDoc := sampleADFDoc("hello")
+
+	cases := []struct {
+		name        string
+		unknowns    tcontainer.MarshalMap
+		wantPresent map[string]any
+		wantAbsent  []string
+	}{
+		{
+			name:        "ADF object passes through verbatim",
+			unknowns:    tcontainer.MarshalMap{"customfield_10001": adfDoc},
+			wantPresent: map[string]any{"customfield_10001": adfDoc},
+		},
+		{
+			name:        "primitive value passes through verbatim",
+			unknowns:    tcontainer.MarshalMap{"customfield_10042": "ABC-123"},
+			wantPresent: map[string]any{"customfield_10042": "ABC-123"},
+		},
+		{
+			name:       "non-customfield_ keys are not surfaced",
+			unknowns:   tcontainer.MarshalMap{"someInternalKey": "leak"},
+			wantAbsent: []string{"someInternalKey"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := &jira.Issue{
+				Key:    "PROJ-1",
+				Fields: &jira.IssueFields{Summary: "s", Unknowns: tc.unknowns},
+			}
+			fields := issueToMap(issue, nil)["fields"].(map[string]any)
+			for k, v := range tc.wantPresent {
+				assert.Equal(t, v, fields[k])
+			}
+			for _, k := range tc.wantAbsent {
+				_, present := fields[k]
+				assert.False(t, present, "expected key %q to be absent", k)
+			}
+		})
+	}
+}
+
+func TestReadByKeys_MultiKey_IncludesCustomFields(t *testing.T) {
+	mc := &mockClient{
+		SearchIssuesFn: func(context.Context, string, *jira.SearchOptionsV3) (*jira.SearchResultV3, error) {
+			return &jira.SearchResultV3{
+				Issues: []jira.Issue{
+					{Key: "A-1", Fields: &jira.IssueFields{
+						Summary:  "a",
+						Unknowns: tcontainer.MarshalMap{"customfield_10001": "value-a"},
+					}},
+					{Key: "B-2", Fields: &jira.IssueFields{
+						Summary:  "b",
+						Unknowns: tcontainer.MarshalMap{"customfield_10001": "value-b"},
+					}},
+				},
+				Total: 2,
+			}, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{Keys: []string{"A-1", "B-2"}})
+	assert.False(t, isErr)
+	assert.Contains(t, text, `"customfield_10001":"value-a"`)
+	assert.Contains(t, text, `"customfield_10001":"value-b"`)
 }
 
 func TestIssueToMap_MinimalFields(t *testing.T) {
@@ -406,13 +493,150 @@ func TestIssueToMap_MinimalFields(t *testing.T) {
 			Summary: "Only summary",
 		},
 	}
-	m := issueToMap(issue)
+	m := issueToMap(issue, nil)
 	fields := m["fields"].(map[string]any)
 	assert.Equal(t, "Only summary", fields["summary"])
 	_, hasStatus := fields["status"]
 	assert.False(t, hasStatus)
 	_, hasAssignee := fields["assignee"]
 	assert.False(t, hasAssignee)
+}
+
+// --- field_format ---
+
+func TestRead_FieldFormat_HandlesADFAndPassThrough(t *testing.T) {
+	const fieldID = "customfield_10001"
+	const textfieldCustom = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+	adfDoc := sampleADFDoc("hello")
+
+	cases := []struct {
+		name        string
+		schema      jira.FieldSchema
+		fieldsKnown bool // whether GetFields lists the field
+		value       any
+		want        any
+	}{
+		{
+			name:        "converts textarea ADF doc to Markdown",
+			schema:      jira.FieldSchema{Custom: textareaTypeKey},
+			fieldsKnown: true,
+			value:       adfDoc,
+			want:        "hello",
+		},
+		{
+			name:        "preserves non-textarea custom-field value",
+			schema:      jira.FieldSchema{Custom: textfieldCustom},
+			fieldsKnown: true,
+			value:       "ABC-123",
+			want:        "ABC-123",
+		},
+		{
+			name:        "preserves textarea field whose value is not an ADF doc",
+			schema:      jira.FieldSchema{Custom: textareaTypeKey},
+			fieldsKnown: true,
+			value:       "raw string somehow",
+			want:        "raw string somehow",
+		},
+		{
+			name:        "passes through fields absent from the catalogue",
+			schema:      jira.FieldSchema{},
+			fieldsKnown: false,
+			value:       adfDoc,
+			want:        adfDoc,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{
+				GetFieldsFn: func(context.Context) ([]jira.Field, error) {
+					if !tc.fieldsKnown {
+						return []jira.Field{}, nil
+					}
+					return []jira.Field{{ID: fieldID, Schema: tc.schema}}, nil
+				},
+				GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, error) {
+					return &jira.Issue{
+						Key: "K-1",
+						Fields: &jira.IssueFields{
+							Summary:  "s",
+							Unknowns: tcontainer.MarshalMap{fieldID: tc.value},
+						},
+					}, nil
+				},
+			}
+			h := &handlers{client: mc}
+			text, isErr := callRead(t, h, ReadArgs{Keys: []string{"K-1"}, FieldFormat: "markdown"})
+			require.False(t, isErr)
+
+			// Decode the JSON tail of the response and find our field.
+			idx := strings.Index(text, "[")
+			require.NotEqual(t, -1, idx)
+			var entries []map[string]any
+			require.NoError(t, json.Unmarshal([]byte(text[idx:]), &entries))
+			require.Len(t, entries, 1)
+			fields := entries[0]["fields"].(map[string]any)
+			assert.Equal(t, tc.want, fields[fieldID])
+		})
+	}
+}
+
+func TestRead_FieldFormatRaw_MakesNoSchemaLookups(t *testing.T) {
+	var fieldsCalls atomic.Int32
+	mc := &mockClient{
+		GetFieldsFn: func(context.Context) ([]jira.Field, error) {
+			fieldsCalls.Add(1)
+			return nil, nil
+		},
+		GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, error) {
+			return &jira.Issue{
+				Key:    "K-1",
+				Fields: &jira.IssueFields{Summary: "s"},
+			}, nil
+		},
+	}
+	h := &handlers{client: mc}
+	for _, format := range []string{"", "raw"} {
+		t.Run("format="+format, func(t *testing.T) {
+			fieldsCalls.Store(0)
+			_, isErr := callRead(t, h, ReadArgs{Keys: []string{"K-1"}, FieldFormat: format})
+			require.False(t, isErr)
+			assert.EqualValues(t, 0, fieldsCalls.Load(), "raw mode must not call GetFields")
+		})
+	}
+}
+
+func TestRead_FieldFormat_InvalidValueReturnsError(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	text, isErr := callRead(t, h, ReadArgs{Keys: []string{"K-1"}, FieldFormat: "wiki"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "field_format")
+	assert.Contains(t, text, "wiki")
+}
+
+func TestRead_FieldFormatMarkdown_BatchSharesCache(t *testing.T) {
+	const fieldID = "customfield_10001"
+	var fieldsCalls atomic.Int32
+	mc := &mockClient{
+		GetFieldsFn: func(context.Context) ([]jira.Field, error) {
+			fieldsCalls.Add(1)
+			return []jira.Field{{ID: fieldID, Schema: jira.FieldSchema{Custom: textareaTypeKey}}}, nil
+		},
+		SearchIssuesFn: func(context.Context, string, *jira.SearchOptionsV3) (*jira.SearchResultV3, error) {
+			return &jira.SearchResultV3{
+				Issues: []jira.Issue{
+					{Key: "A-1", Fields: &jira.IssueFields{Summary: "a", Unknowns: tcontainer.MarshalMap{fieldID: sampleADFDoc("first")}}},
+					{Key: "B-2", Fields: &jira.IssueFields{Summary: "b", Unknowns: tcontainer.MarshalMap{fieldID: sampleADFDoc("second")}}},
+				},
+				Total: 2,
+			}, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{Keys: []string{"A-1", "B-2"}, FieldFormat: "markdown"})
+	require.False(t, isErr)
+	assert.Contains(t, text, `"customfield_10001":"first"`)
+	assert.Contains(t, text, `"customfield_10001":"second"`)
+	assert.EqualValues(t, 1, fieldsCalls.Load(), "GetFields must be called once across the batch")
 }
 
 // --- default limit ---

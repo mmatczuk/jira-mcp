@@ -1,4 +1,10 @@
-// Package mdconv converts Markdown text to Atlassian Document Format (ADF).
+// Package mdconv converts Markdown text to Atlassian Document Format (ADF)
+// and back. ToADF and FromADF are inverses across the supported node set.
+//
+// Round-trip canonicalisation: FromADF emits a single canonical Markdown
+// form regardless of input variant. For bullet lists this is the "- " marker
+// (asterisk-prefixed lists round-trip to dash-prefixed lists). Ordered lists
+// renumber from 1. Code blocks retain their language hint when present.
 package mdconv
 
 import (

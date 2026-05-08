@@ -56,6 +56,8 @@ type WriteItem struct {
 
 	FieldsJSON string `json:"fields_json,omitempty" jsonschema:"Raw JSON object merged into issue fields. Escape hatch for custom fields."`
 
+	CustomFieldsMarkdown map[string]string `json:"custom_fields_markdown,omitempty" jsonschema:"Map of custom-field ID → Markdown body. Each value is converted to ADF and merged into the issue fields. Use this for ADF rich-text custom fields (schema_custom ending in :textarea); other field types must use fields_json. The same field ID cannot appear in both fields_json and custom_fields_markdown. Pass an empty string to clear the field (writes an empty ADF document). Example combined write: {\"key\": \"PROJ-1\", \"description\": \"<visible body>\", \"custom_fields_markdown\": {\"customfield_X\": \"<markdown body>\"}}."`
+
 	Links   []LinkItem   `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
 	Unlinks []UnlinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue."`
 }
@@ -82,7 +84,7 @@ Actions:
 
 Creating issues:
 - Required custom fields are automatically validated before submission. If any are missing, the error lists each field by name with allowed values.
-- Pass custom fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}").
+- Pass custom fields via fields_json (e.g. fields_json="{\"customfield_10104\": {\"value\": \"Production\"}}"). For ADF rich-text custom fields (jira_schema reports content_format="adf"), prefer custom_fields_markdown — it accepts Markdown and converts to ADF in one call. The same field ID cannot appear in both.
 - If the issue type is invalid for the project, the error lists available types.
 
 All actions support dry_run=true to preview without executing.
@@ -282,6 +284,7 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 	}
 
 	cache := newCreateMetaCache()
+	schemaCache := newFieldSchemaCache(h.client)
 	var results []string
 
 	for i, item := range args.Items {
@@ -291,9 +294,9 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 
 		switch args.Action {
 		case "create":
-			msg, err = h.writeCreate(ctx, item, args.DryRun, cache)
+			msg, err = h.writeCreate(ctx, item, args.DryRun, cache, schemaCache)
 		case "update":
-			msg, err = h.writeUpdate(ctx, item, args.DryRun)
+			msg, err = h.writeUpdate(ctx, item, args.DryRun, schemaCache)
 		case "delete":
 			msg, err = h.writeDelete(ctx, item, args.DryRun)
 		case "transition":
@@ -534,6 +537,59 @@ func buildCommentBody(body, rawFormat string) (out any, format string, err error
 	}, format, nil
 }
 
+// applyCustomFieldsMarkdown converts each entry in item.CustomFieldsMarkdown
+// to ADF and merges it into payload["fields"]. It is generic across projects:
+// the per-field decision (Markdown/ADF vs reject) keys off the field's
+// schema.custom value via schemaCache, not a hard-coded list of IDs.
+//
+// Errors short-circuit before any write occurs:
+//   - any field ID also present in fields_json (or already populated by a
+//     standard struct field) — the caller has to pick one source.
+//   - any field whose schema is not :textarea — fields_json is the right
+//     escape hatch for non-ADF custom fields.
+//   - any field absent from the catalogue — surfaces a discovery hint.
+//
+// Empty-string values are treated as an explicit clear: the field is set to
+// an empty ADF document so that Jira removes prior content. Validation
+// (collision, schema lookup, textarea check) still runs first.
+func applyCustomFieldsMarkdown(ctx context.Context, item WriteItem, payload map[string]any, schemaCache *fieldSchemaCache) error {
+	if len(item.CustomFieldsMarkdown) == 0 {
+		return nil
+	}
+	fields := payload["fields"].(map[string]any)
+	for fieldID, md := range item.CustomFieldsMarkdown {
+		if _, exists := fields[fieldID]; exists {
+			return fmt.Errorf("custom_fields_markdown[%s] collides with fields_json or a standard field — set the value in only one place", fieldID)
+		}
+		schema, err := schemaCache.get(ctx, fieldID)
+		if err != nil {
+			return err
+		}
+		if !isADFRichText(schema) {
+			return fmt.Errorf("custom_fields_markdown[%s] is not an ADF rich-text field (schema.custom=%q). Use fields_json for non-ADF custom fields", fieldID, schema.Custom)
+		}
+		if md == "" {
+			fields[fieldID] = emptyADFDoc()
+			continue
+		}
+		if adf := mdconv.ToADF(md); adf != nil {
+			fields[fieldID] = adf
+		}
+	}
+	return nil
+}
+
+// emptyADFDoc is the canonical empty ADF document used to clear an
+// ADF rich-text custom field. Writing this object via update removes any
+// prior content on the field while keeping the field present on the issue.
+func emptyADFDoc() map[string]any {
+	return map[string]any{
+		"version": 1,
+		"type":    "doc",
+		"content": []any{},
+	}
+}
+
 // standardFields are field IDs that buildIssuePayload maps from WriteItem
 // struct fields. They don't need to appear in fields_json.
 var standardFields = map[string]bool{
@@ -541,7 +597,7 @@ var standardFields = map[string]bool{
 	"priority": true, "assignee": true, "description": true, "labels": true,
 }
 
-func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool, cache *createMetaCache) (string, error) {
+func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool, cache *createMetaCache, schemaCache *fieldSchemaCache) (string, error) {
 	if item.Project == "" || item.Summary == "" || item.IssueType == "" {
 		return "", fmt.Errorf("create requires project, summary, and issue_type. Got project=%q summary=%q issue_type=%q", item.Project, item.Summary, item.IssueType)
 	}
@@ -554,6 +610,9 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 
 	payload, format, err := buildIssuePayload(item)
 	if err != nil {
+		return "", err
+	}
+	if err := applyCustomFieldsMarkdown(ctx, item, payload, schemaCache); err != nil {
 		return "", err
 	}
 
@@ -680,7 +739,7 @@ func (h *handlers) preflightRequiredFields(ctx context.Context, item WriteItem, 
 	return fmt.Sprintf("missing required fields. Pass them via fields_json:\n%s", strings.Join(missing, "\n")), nil
 }
 
-func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool, schemaCache *fieldSchemaCache) (string, error) {
 	if item.Key == "" {
 		return "", fmt.Errorf("update requires key")
 	}
@@ -693,6 +752,9 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool)
 
 	payload, format, err := buildIssuePayload(item)
 	if err != nil {
+		return "", err
+	}
+	if err := applyCustomFieldsMarkdown(ctx, item, payload, schemaCache); err != nil {
 		return "", err
 	}
 
