@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mmatczuk/jira-mcp/internal/jira"
@@ -90,6 +91,124 @@ func TestSchemaFields_SchemaItems(t *testing.T) {
 	text, _ := callSchema(t, h, SchemaArgs{Resource: "fields"})
 	assert.Contains(t, text, "schema_items")
 	assert.Contains(t, text, "string")
+}
+
+func TestSchemaFields_ContentFormatAndSchemaCustom(t *testing.T) {
+	const (
+		textareaCustom  = "com.atlassian.jira.plugin.system.customfieldtypes:textarea"
+		textfieldCustom = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+	)
+	cases := []struct {
+		name              string
+		schemaCustom      string
+		wantContentFormat any // nil ⇒ key must be absent
+		wantSchemaCustom  any
+	}{
+		{
+			name:              "textarea emits content_format=adf",
+			schemaCustom:      textareaCustom,
+			wantContentFormat: "adf",
+			wantSchemaCustom:  textareaCustom,
+		},
+		{
+			name:              "non-textarea omits content_format but echoes schema_custom",
+			schemaCustom:      textfieldCustom,
+			wantContentFormat: nil,
+			wantSchemaCustom:  textfieldCustom,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{
+				GetFieldsFn: func(context.Context) ([]jira.Field, error) {
+					return []jira.Field{
+						{
+							ID:     "customfield_1",
+							Name:   "Custom",
+							Custom: true,
+							Schema: jira.FieldSchema{Type: "string", Custom: tc.schemaCustom},
+						},
+					}, nil
+				},
+			}
+			h := &handlers{client: mc}
+			text, isErr := callSchema(t, h, SchemaArgs{Resource: "fields"})
+			assert.False(t, isErr)
+
+			entries := unmarshalSchemaFieldEntries(t, text)
+			require.Len(t, entries, 1)
+			assert.Equal(t, tc.wantSchemaCustom, entries[0]["schema_custom"])
+			if tc.wantContentFormat == nil {
+				_, present := entries[0]["content_format"]
+				assert.False(t, present, "content_format should be absent")
+			} else {
+				assert.Equal(t, tc.wantContentFormat, entries[0]["content_format"])
+			}
+		})
+	}
+}
+
+func TestSchemaFields_NameFilter(t *testing.T) {
+	allFields := []jira.Field{
+		{ID: "customfield_1", Name: "Notes", Schema: jira.FieldSchema{Type: "string"}},
+		{ID: "customfield_2", Name: "notes", Schema: jira.FieldSchema{Type: "string"}},
+		{ID: "summary", Name: "Summary", Schema: jira.FieldSchema{Type: "string"}},
+	}
+	cases := []struct {
+		name           string
+		filter         string
+		wantIDs        []string
+		wantInSummary  string
+	}{
+		{
+			name:          "exact case-insensitive match returns all matches",
+			filter:        "Notes",
+			wantIDs:       []string{"customfield_1", "customfield_2"},
+			wantInSummary: `name="Notes"`,
+		},
+		{
+			name:          "no match returns empty list and mentions the queried name",
+			filter:        "Nonexistent",
+			wantIDs:       nil,
+			wantInSummary: `name="Nonexistent"`,
+		},
+		{
+			name:          "empty filter preserves full list",
+			filter:        "",
+			wantIDs:       []string{"customfield_1", "customfield_2", "summary"},
+			wantInSummary: "Found 3 field(s)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{
+				GetFieldsFn: func(context.Context) ([]jira.Field, error) { return allFields, nil },
+			}
+			h := &handlers{client: mc}
+			text, isErr := callSchema(t, h, SchemaArgs{Resource: "fields", Name: tc.filter})
+			assert.False(t, isErr)
+			assert.Contains(t, text, tc.wantInSummary)
+
+			entries := unmarshalSchemaFieldEntries(t, text)
+			gotIDs := make([]string, 0, len(entries))
+			for _, e := range entries {
+				gotIDs = append(gotIDs, e["id"].(string))
+			}
+			assert.ElementsMatch(t, tc.wantIDs, gotIDs)
+		})
+	}
+}
+
+// unmarshalSchemaFieldEntries extracts the JSON entries from a schemaFields
+// response. The handler emits a human-readable preamble followed by a JSON
+// array — split on the blank line and decode the tail.
+func unmarshalSchemaFieldEntries(t *testing.T, text string) []map[string]any {
+	t.Helper()
+	idx := strings.Index(text, "[")
+	require.NotEqual(t, -1, idx, "expected JSON array in response: %s", text)
+	var entries []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text[idx:]), &entries))
+	return entries
 }
 
 // --- transitions ---
