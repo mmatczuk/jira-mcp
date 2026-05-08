@@ -307,6 +307,20 @@ func TestWrite_CustomFieldsMarkdown_RejectsBadFields(t *testing.T) {
 			},
 			wantInError: "customfield_10001",
 		},
+		{
+			name: "empty value does not bypass non-textarea rejection",
+			fields: []jira.Field{
+				{ID: "customfield_50", Schema: jira.FieldSchema{
+					Type:   "string",
+					Custom: "com.atlassian.jira.plugin.system.customfieldtypes:textfield",
+				}},
+			},
+			writeItem: WriteItem{
+				Key:                  "K-1",
+				CustomFieldsMarkdown: map[string]string{"customfield_50": ""},
+			},
+			wantInError: "customfield_50",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +339,39 @@ func TestWrite_CustomFieldsMarkdown_RejectsBadFields(t *testing.T) {
 			assert.False(t, updateCalled, "no write should be issued when validation fails")
 		})
 	}
+}
+
+func TestWrite_CustomFieldsMarkdown_EmptyClearsField(t *testing.T) {
+	var captured map[string]any
+	mc := &mockClient{
+		GetFieldsFn: fieldsCatalogue(jira.Field{
+			ID: "customfield_10001", Schema: jira.FieldSchema{Type: "string", Custom: textareaTypeKey},
+		}),
+		UpdateIssueV3Fn: func(_ context.Context, _ string, payload map[string]any) error {
+			captured = payload
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:                  "PROJ-1",
+			CustomFieldsMarkdown: map[string]string{"customfield_10001": ""},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated PROJ-1")
+
+	require.NotNil(t, captured, "update must be issued for an explicit clear")
+	fields := captured["fields"].(map[string]any)
+	adf, ok := fields["customfield_10001"].(map[string]any)
+	require.True(t, ok, "customfield_10001 should be an ADF object on clear")
+	assert.Equal(t, "doc", adf["type"])
+	assert.Equal(t, 1, adf["version"])
+	content, ok := adf["content"].([]any)
+	require.True(t, ok, "ADF content must be a slice")
+	assert.Empty(t, content, "clear writes an empty ADF document")
 }
 
 func TestWrite_CustomFieldsMarkdown_BatchSharesCache(t *testing.T) {

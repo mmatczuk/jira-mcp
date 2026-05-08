@@ -239,23 +239,40 @@ func TestFromADF_EmptyInputs(t *testing.T) {
 
 // --- round-trip on a representative Markdown corpus ---
 
+// TestRoundTrip_MarkdownCorpus covers Markdown → ADF → Markdown across the
+// surface used to write rich-text custom fields via custom_fields_markdown
+// and read them back via field_format=markdown. Cases where in == want
+// document identity round-trip; cases where they differ document the
+// canonical form FromADF emits for variant input (e.g. * → - for bullets,
+// 1./1./1. → 1./2./3. for ordered lists).
 func TestRoundTrip_MarkdownCorpus(t *testing.T) {
 	cases := []struct {
-		name     string
-		markdown string
+		name string
+		in   string
+		want string
 	}{
-		{name: "single paragraph", markdown: "hello world"},
-		{name: "heading and paragraph", markdown: "# Title\n\nParagraph body"},
-		{name: "heading hierarchy", markdown: "# H1\n\n## H2\n\n### H3"},
-		{name: "bullet list", markdown: "- one\n- two\n- three"},
-		{name: "ordered list", markdown: "1. first\n2. second\n3. third"},
-		{name: "inline marks", markdown: "**bold** and *italic* and `inline code`"},
-		{name: "link", markdown: "see [docs](https://example.com)"},
-		{name: "fenced code with lang", markdown: "```go\nfmt.Println(\"hi\")\n```"},
-		{name: "soft-break in paragraph", markdown: "line one\nline two"},
+		{name: "single paragraph", in: "hello world", want: "hello world"},
+		{name: "heading and paragraph", in: "# Title\n\nParagraph body", want: "# Title\n\nParagraph body"},
+		{name: "heading hierarchy", in: "# H1\n\n## H2\n\n### H3", want: "# H1\n\n## H2\n\n### H3"},
+		{name: "bullet list with dash markers", in: "- one\n- two\n- three", want: "- one\n- two\n- three"},
+		{name: "bullet list with asterisk markers normalises to dash", in: "* one\n* two", want: "- one\n- two"},
+		{name: "ordered list", in: "1. first\n2. second\n3. third", want: "1. first\n2. second\n3. third"},
+		{name: "ordered list renumbers from 1", in: "1. first\n1. second\n1. third", want: "1. first\n2. second\n3. third"},
+		{name: "nested bullet list preserves two-level indentation", in: "- one\n  - nested\n- two", want: "- one\n  - nested\n- two"},
+		{name: "inline marks", in: "**bold** and *italic* and `inline code`", want: "**bold** and *italic* and `inline code`"},
+		{name: "mixed bold and inline code in same paragraph", in: "**bold** then `code` here", want: "**bold** then `code` here"},
+		{name: "link", in: "see [docs](https://example.com)", want: "see [docs](https://example.com)"},
+		{name: "fenced code with lang", in: "```go\nfmt.Println(\"hi\")\n```", want: "```go\nfmt.Println(\"hi\")\n```"},
+		{name: "fenced code without lang", in: "```\nplain block\n```", want: "```\nplain block\n```"},
+		{name: "soft-break in paragraph", in: "line one\nline two", want: "line one\nline two"},
 		{
 			name: "mixed paragraphs and bullet list",
-			markdown: "**Status:** open\n\n" +
+			in: "**Status:** open\n\n" +
+				"**Notes**\n\n" +
+				"- first item\n" +
+				"- second item\n" +
+				"- third item",
+			want: "**Status:** open\n\n" +
 				"**Notes**\n\n" +
 				"- first item\n" +
 				"- second item\n" +
@@ -264,10 +281,32 @@ func TestRoundTrip_MarkdownCorpus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			adf := ToADF(tc.markdown)
+			adf := ToADF(tc.in)
+			require.NotNil(t, adf, "ToADF must produce a doc for non-empty input")
 			got, err := FromADF(adf)
 			require.NoError(t, err)
-			assert.Equal(t, tc.markdown, strings.TrimRight(got, "\n"))
+			assert.Equal(t, tc.want, strings.TrimRight(got, "\n"))
 		})
 	}
+}
+
+// TestRoundTrip_EmptyInput documents the empty-content contract that
+// custom_fields_markdown relies on for clear-field semantics: empty Markdown
+// yields nil ADF (skipping the assignment), and an empty ADF document reads
+// back as an empty Markdown string.
+func TestRoundTrip_EmptyInput(t *testing.T) {
+	t.Run("empty markdown produces nil ADF", func(t *testing.T) {
+		assert.Nil(t, ToADF(""))
+	})
+
+	t.Run("empty ADF document reads back as empty markdown", func(t *testing.T) {
+		empty := map[string]any{
+			"version": 1,
+			"type":    "doc",
+			"content": []any{},
+		}
+		got, err := FromADF(empty)
+		require.NoError(t, err)
+		assert.Equal(t, "", got)
+	})
 }

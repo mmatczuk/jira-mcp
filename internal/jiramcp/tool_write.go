@@ -56,7 +56,7 @@ type WriteItem struct {
 
 	FieldsJSON string `json:"fields_json,omitempty" jsonschema:"Raw JSON object merged into issue fields. Escape hatch for custom fields."`
 
-	CustomFieldsMarkdown map[string]string `json:"custom_fields_markdown,omitempty" jsonschema:"Map of custom-field ID → Markdown body. Each value is converted to ADF and merged into the issue fields. Use this for ADF rich-text custom fields (schema_custom ending in :textarea); other field types must use fields_json. The same field ID cannot appear in both fields_json and custom_fields_markdown."`
+	CustomFieldsMarkdown map[string]string `json:"custom_fields_markdown,omitempty" jsonschema:"Map of custom-field ID → Markdown body. Each value is converted to ADF and merged into the issue fields. Use this for ADF rich-text custom fields (schema_custom ending in :textarea); other field types must use fields_json. The same field ID cannot appear in both fields_json and custom_fields_markdown. Pass an empty string to clear the field (writes an empty ADF document). Example combined write: {\"key\": \"PROJ-1\", \"description\": \"<visible body>\", \"custom_fields_markdown\": {\"customfield_X\": \"<markdown body>\"}}."`
 
 	Links   []LinkItem   `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
 	Unlinks []UnlinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue."`
@@ -548,6 +548,10 @@ func buildCommentBody(body, rawFormat string) (out any, format string, err error
 //   - any field whose schema is not :textarea — fields_json is the right
 //     escape hatch for non-ADF custom fields.
 //   - any field absent from the catalogue — surfaces a discovery hint.
+//
+// Empty-string values are treated as an explicit clear: the field is set to
+// an empty ADF document so that Jira removes prior content. Validation
+// (collision, schema lookup, textarea check) still runs first.
 func applyCustomFieldsMarkdown(ctx context.Context, item WriteItem, payload map[string]any, schemaCache *fieldSchemaCache) error {
 	if len(item.CustomFieldsMarkdown) == 0 {
 		return nil
@@ -564,11 +568,26 @@ func applyCustomFieldsMarkdown(ctx context.Context, item WriteItem, payload map[
 		if !isADFRichText(schema) {
 			return fmt.Errorf("custom_fields_markdown[%s] is not an ADF rich-text field (schema.custom=%q). Use fields_json for non-ADF custom fields", fieldID, schema.Custom)
 		}
+		if md == "" {
+			fields[fieldID] = emptyADFDoc()
+			continue
+		}
 		if adf := mdconv.ToADF(md); adf != nil {
 			fields[fieldID] = adf
 		}
 	}
 	return nil
+}
+
+// emptyADFDoc is the canonical empty ADF document used to clear an
+// ADF rich-text custom field. Writing this object via update removes any
+// prior content on the field while keeping the field present on the issue.
+func emptyADFDoc() map[string]any {
+	return map[string]any{
+		"version": 1,
+		"type":    "doc",
+		"content": []any{},
+	}
 }
 
 // standardFields are field IDs that buildIssuePayload maps from WriteItem
