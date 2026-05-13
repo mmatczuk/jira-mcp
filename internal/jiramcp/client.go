@@ -36,4 +36,8 @@ type JiraClient interface {
 	CreateIssueLink(ctx context.Context, in jira.CreateIssueLinkInput) error
 	DeleteIssueLink(ctx context.Context, linkID string) error
 	GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkType, error)
+	GetAttachmentMeta(ctx context.Context, id string) (*jira.Attachment, error)
+	GetAttachmentBody(ctx context.Context, id string, maxBytes int64) ([]byte, error)
+	PostAttachmentText(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error)
+	DeleteAttachment(ctx context.Context, id string) error
 }

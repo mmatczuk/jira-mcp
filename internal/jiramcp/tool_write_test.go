@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	gojira "github.com/andygrunwald/go-jira"
@@ -2141,4 +2142,208 @@ func TestWriteCreate_PreflightWarningInDryRun(t *testing.T) {
 	assert.Contains(t, text, "Would create issue")
 	assert.Contains(t, text, "Preflight warning")
 	assert.Contains(t, text, "Redpanda Version")
+}
+
+// --- attach (update sub-op) ---
+
+func TestWriteUpdate_Attach_HappyPath(t *testing.T) {
+	var gotKey, gotName, gotBody string
+	mc := &mockClient{
+		PostAttachmentTextFn: func(_ context.Context, key, name, body string) (*jira.Attachment, error) {
+			gotKey, gotName, gotBody = key, name, body
+			return &jira.Attachment{ID: "20001", Filename: name, MimeType: "text/plain", Size: len(body)}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Attach: &AttachItem{Filename: "build.log", Data: "hello, world\n"},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Equal(t, "PROJ-1", gotKey)
+	assert.Equal(t, "build.log", gotName)
+	assert.Equal(t, "hello, world\n", gotBody)
+	assert.Contains(t, text, "Attached build.log")
+	assert.Contains(t, text, "20001")
+}
+
+func TestWriteUpdate_Attach_DryRun_NoCall(t *testing.T) {
+	called := false
+	mc := &mockClient{
+		PostAttachmentTextFn: func(context.Context, string, string, string) (*jira.Attachment, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		DryRun: true,
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Attach: &AttachItem{Filename: "x.txt", Data: "ok"},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.False(t, called, "PostAttachmentText must not be called in dry_run")
+	assert.Contains(t, text, "Would attach x.txt to PROJ-1")
+}
+
+func TestWriteUpdate_Attach_Rejects(t *testing.T) {
+	pngHeader := string([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00})
+	overCap := strings.Repeat("a", 5*1024*1024+1)
+
+	cases := []struct {
+		name       string
+		attach     AttachItem
+		wantSubstr string
+	}{
+		{"over cap", AttachItem{Filename: "huge.txt", Data: overCap}, "exceeds"},
+		{"binary bytes in body", AttachItem{Filename: "tricky.txt", Data: pngHeader}, "binary content"},
+		{"missing filename", AttachItem{Filename: "", Data: "ok"}, "filename"},
+		{"missing data", AttachItem{Filename: "x.txt", Data: ""}, "data"},
+		{"binary mime inferred from extension", AttachItem{Filename: "shot.png", Data: "this is text"}, "image/png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mc := &mockClient{
+				PostAttachmentTextFn: func(context.Context, string, string, string) (*jira.Attachment, error) {
+					called = true
+					return nil, nil
+				},
+			}
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: "update",
+				Items:  []WriteItem{{Key: "PROJ-1", Attach: &tc.attach}},
+			})
+			assert.False(t, called, "PostAttachmentText must not be called when validation rejects")
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, tc.wantSubstr)
+		})
+	}
+}
+
+// --- detach (update sub-op) ---
+
+func TestWriteUpdate_Detach_HappyPath(t *testing.T) {
+	var gotID string
+	mc := &mockClient{
+		DeleteAttachmentFn: func(_ context.Context, id string) error {
+			gotID = id
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Detach: "10100",
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Equal(t, "10100", gotID)
+	assert.Contains(t, text, "Detached attachment 10100")
+}
+
+func TestWriteUpdate_Detach_DryRun(t *testing.T) {
+	called := false
+	mc := &mockClient{
+		DeleteAttachmentFn: func(context.Context, string) error {
+			called = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		DryRun: true,
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Detach: "10100",
+		}},
+	})
+	assert.False(t, called)
+	assert.Contains(t, text, "Would detach attachment 10100")
+}
+
+func TestWriteUpdate_AttachAndDetach_OnSameItem(t *testing.T) {
+	postCalled, deleteCalled := false, false
+	mc := &mockClient{
+		PostAttachmentTextFn: func(context.Context, string, string, string) (*jira.Attachment, error) {
+			postCalled = true
+			return &jira.Attachment{ID: "20002", Filename: "new.log"}, nil
+		},
+		DeleteAttachmentFn: func(context.Context, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Attach: &AttachItem{Filename: "new.log", Data: "fresh"},
+			Detach: "10000",
+		}},
+	})
+	assert.False(t, isErr)
+	assert.True(t, postCalled)
+	assert.True(t, deleteCalled)
+	assert.Contains(t, text, "Detached attachment 10000")
+	assert.Contains(t, text, "Attached new.log")
+}
+
+func TestWriteUpdate_MultipleAttachesAcrossItems(t *testing.T) {
+	var gotNames []string
+	mc := &mockClient{
+		PostAttachmentTextFn: func(_ context.Context, _, name, _ string) (*jira.Attachment, error) {
+			gotNames = append(gotNames, name)
+			return &jira.Attachment{ID: "x", Filename: name}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	_, isErr := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{
+			{Key: "PROJ-1", Attach: &AttachItem{Filename: "a.txt", Data: "x"}},
+			{Key: "PROJ-1", Attach: &AttachItem{Filename: "b.txt", Data: "y"}},
+			{Key: "PROJ-2", Attach: &AttachItem{Filename: "c.txt", Data: "z"}},
+		},
+	})
+	assert.False(t, isErr)
+	assert.Equal(t, []string{"a.txt", "b.txt", "c.txt"}, gotNames)
+}
+
+func TestWriteUpdate_AttachClientError_DoesNotRegressLinks(t *testing.T) {
+	// One failing attach must not prevent the link from being created.
+	postErr := fmt.Errorf("simulated jira 500")
+	linkCalled := false
+	mc := &mockClient{
+		PostAttachmentTextFn: func(context.Context, string, string, string) (*jira.Attachment, error) {
+			return nil, postErr
+		},
+		CreateIssueLinkFn: func(context.Context, jira.CreateIssueLinkInput) error {
+			linkCalled = true
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "update",
+		Items: []WriteItem{{
+			Key:    "PROJ-1",
+			Attach: &AttachItem{Filename: "x.txt", Data: "ok"},
+			Links:  []LinkItem{{Type: "Blocks", From: "PROJ-1", To: "PROJ-2"}},
+		}},
+	})
+	assert.True(t, linkCalled, "link must still be attempted after attach error")
+	assert.Contains(t, text, "simulated jira 500")
+	assert.Contains(t, text, "Linked PROJ-1 → PROJ-2")
 }

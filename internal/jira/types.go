@@ -6,6 +6,7 @@ import "github.com/andygrunwald/go-jira"
 // import go-jira directly.
 
 type (
+	Attachment           = jira.Attachment
 	Board                = jira.Board
 	BoardListOptions     = jira.BoardListOptions
 	Field                = jira.Field

@@ -415,6 +415,251 @@ func TestIssueToMap_MinimalFields(t *testing.T) {
 	assert.False(t, hasAssignee)
 }
 
+func TestIssueToMap_Attachments(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			Attachments: []*jira.Attachment{
+				{
+					ID:       "10100",
+					Filename: "build.log",
+					Size:     1234,
+					MimeType: "text/plain",
+					Created:  "2025-03-12T10:23:45.000-0700",
+					Author:   &jira.User{DisplayName: "Alice", AccountID: "u-1"},
+				},
+				{
+					ID:       "10101",
+					Filename: "report.csv",
+					Size:     56,
+					MimeType: "text/csv",
+					Created:  "not-a-real-timestamp",
+				},
+			},
+		},
+	}
+
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+
+	atts, ok := fields["attachment"].([]map[string]any)
+	require.True(t, ok, "attachment should be a []map[string]any")
+	require.Len(t, atts, 2)
+
+	assert.Equal(t, "10100", atts[0]["id"])
+	assert.Equal(t, "build.log", atts[0]["filename"])
+	assert.Equal(t, 1234, atts[0]["size"])
+	assert.Equal(t, "text/plain", atts[0]["mime_type"])
+	// Parseable Jira timestamp → RFC3339.
+	assert.Equal(t, "2025-03-12T10:23:45-07:00", atts[0]["created"])
+	assert.Equal(t, map[string]any{"displayName": "Alice", "accountId": "u-1"}, atts[0]["author"])
+
+	// Unparseable timestamp passes through verbatim; author absent.
+	assert.Equal(t, "not-a-real-timestamp", atts[1]["created"])
+	_, hasAuthor := atts[1]["author"]
+	assert.False(t, hasAuthor)
+}
+
+func TestIssueToMap_NoAttachments_KeyOmitted(t *testing.T) {
+	issue := &jira.Issue{
+		Key:    "PROJ-2",
+		Fields: &jira.IssueFields{Summary: "x"},
+	}
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	_, hasAttachments := fields["attachment"]
+	assert.False(t, hasAttachments)
+}
+
+func TestIssueToMap_EmptyAttachmentsSlice_KeyOmitted(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-3",
+		Fields: &jira.IssueFields{
+			Summary:     "x",
+			Attachments: []*jira.Attachment{},
+		},
+	}
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	_, hasAttachments := fields["attachment"]
+	assert.False(t, hasAttachments)
+}
+
+// --- readAttachment ---
+
+func TestReadAttachment_HappyPath(t *testing.T) {
+	cases := []struct {
+		name         string
+		filename     string
+		mime         string
+		body         []byte
+		bodyContains string
+	}{
+		{"text/plain", "notes.txt", "text/plain", []byte("hello, world\n"), "hello, world"},
+		{"application/json", "x.json", "application/json", []byte(`{"ok":true}`), `"ok":true`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const id = "10100"
+			mc := &mockClient{
+				GetAttachmentMetaFn: func(_ context.Context, gotID string) (*jira.Attachment, error) {
+					assert.Equal(t, id, gotID)
+					return &jira.Attachment{ID: id, Filename: tc.filename, MimeType: tc.mime, Size: len(tc.body)}, nil
+				},
+				GetAttachmentBodyFn: func(_ context.Context, gotID string, max int64) ([]byte, error) {
+					assert.Equal(t, id, gotID)
+					assert.EqualValues(t, attachmentMaxBytes, max)
+					return tc.body, nil
+				},
+			}
+			h := &handlers{client: mc}
+			text, isErr := callRead(t, h, ReadArgs{AttachmentID: id})
+			assert.False(t, isErr)
+			assert.Contains(t, text, tc.filename)
+			assert.Contains(t, text, tc.mime)
+			assert.Contains(t, text, tc.bodyContains)
+		})
+	}
+}
+
+func TestReadAttachment_RejectsDeclaredBinaryMime_NoBodyCall(t *testing.T) {
+	bodyCalled := false
+	mc := &mockClient{
+		GetAttachmentMetaFn: func(context.Context, string) (*jira.Attachment, error) {
+			return &jira.Attachment{ID: "1", Filename: "shot.png", MimeType: "image/png", Size: 1024}, nil
+		},
+		GetAttachmentBodyFn: func(context.Context, string, int64) ([]byte, error) {
+			bodyCalled = true
+			return nil, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{AttachmentID: "1"})
+	assert.True(t, isErr)
+	assert.False(t, bodyCalled, "GetAttachmentBody must not be called when declared mime is non-text")
+	assert.Contains(t, text, "image/png")
+	assert.Contains(t, text, "text attachments only")
+}
+
+func TestReadAttachment_RejectsBinaryBody(t *testing.T) {
+	// Declared mime passes the allowlist but the bytes are binary. Both
+	// the sniff check (PNG signature) and the NUL-byte check should fire.
+	pngHeader := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D}
+	cases := []struct {
+		name     string
+		filename string
+		body     []byte
+	}{
+		{"PNG signature in body", "actually.png", pngHeader},
+		{"NUL byte in body", "weird.log", []byte("hello\x00world")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{
+				GetAttachmentMetaFn: func(context.Context, string) (*jira.Attachment, error) {
+					return &jira.Attachment{ID: "1", Filename: tc.filename, MimeType: "text/plain", Size: len(tc.body)}, nil
+				},
+				GetAttachmentBodyFn: func(context.Context, string, int64) ([]byte, error) { return tc.body, nil },
+			}
+			h := &handlers{client: mc}
+			text, isErr := callRead(t, h, ReadArgs{AttachmentID: "1"})
+			assert.True(t, isErr)
+			assert.Contains(t, text, "binary content")
+		})
+	}
+}
+
+func TestReadAttachment_OverCap_PropagatesSentinel(t *testing.T) {
+	mc := &mockClient{
+		GetAttachmentMetaFn: func(context.Context, string) (*jira.Attachment, error) {
+			return &jira.Attachment{ID: "1", Filename: "huge.log", MimeType: "text/plain", Size: 99999999}, nil
+		},
+		GetAttachmentBodyFn: func(context.Context, string, int64) ([]byte, error) {
+			return nil, fmt.Errorf("attachment 1: %w", jira.ErrAttachmentTooLarge)
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{AttachmentID: "1"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "exceeds")
+	assert.Contains(t, text, "huge.log")
+}
+
+func TestReadAttachment_MutualExclusion(t *testing.T) {
+	cases := []struct {
+		name string
+		args ReadArgs
+	}{
+		{"with keys", ReadArgs{Keys: []string{"X-1"}, AttachmentID: "1"}},
+		{"with jql", ReadArgs{JQL: "project = X", AttachmentID: "1"}},
+		{"with resource", ReadArgs{Resource: "projects", AttachmentID: "1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &handlers{client: &mockClient{}}
+			text, isErr := callRead(t, h, tc.args)
+			assert.True(t, isErr)
+			assert.Contains(t, text, "not multiple")
+		})
+	}
+}
+
+func TestReadAttachment_MetaErrorPropagates(t *testing.T) {
+	mc := &mockClient{
+		GetAttachmentMetaFn: func(context.Context, string) (*jira.Attachment, error) {
+			return nil, fmt.Errorf("404 not found")
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{AttachmentID: "missing"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "404 not found")
+}
+
+// --- validateTextAttachment ---
+
+func TestValidateTextAttachment_Accepts(t *testing.T) {
+	cases := []struct {
+		name string
+		mime string
+		body []byte
+	}{
+		{"text/plain", "text/plain", []byte("hello")},
+		{"text/plain with charset", "text/plain; charset=utf-8", []byte("hello")},
+		{"application/json", "application/json", []byte(`{"a":1}`)},
+		{"application/xml", "application/xml", []byte("<root/>")},
+		{"empty mime, bytes look text", "", []byte("just plain text")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NoError(t, validateTextAttachment(tc.mime, tc.body))
+		})
+	}
+}
+
+func TestValidateTextAttachment_Rejects(t *testing.T) {
+	pngHeader := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D}
+	cases := []struct {
+		name           string
+		mime           string
+		body           []byte
+		errContains    string
+	}{
+		{"declared binary mime", "image/png", []byte("ignored"), "image/png"},
+		{"declared text but NUL byte in body", "text/plain", []byte("hello\x00world"), "binary content"},
+		{"declared text but PNG signature in body", "text/plain", pngHeader, "binary content"},
+		{"empty mime, bytes look binary", "", pngHeader[:8], "binary content"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTextAttachment(tc.mime, tc.body)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errContains)
+		})
+	}
+}
+
 // --- default limit ---
 
 func TestHandleRead_DefaultLimit(t *testing.T) {

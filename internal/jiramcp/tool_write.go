@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"path"
 	"regexp"
 	"strings"
 
@@ -34,6 +36,14 @@ type UnlinkItem struct {
 	To     string `json:"to,omitempty" jsonschema:"Issue key on the passive side. Required when link_id is not provided."`
 }
 
+// AttachItem is the payload for the attach sub-op on WriteItem. Applied
+// under action=update. v1 is text only — see validateTextAttachment for
+// the mime + bytes policy.
+type AttachItem struct {
+	Filename string `json:"filename" jsonschema:"Attachment filename including extension."`
+	Data     string `json:"data" jsonschema:"UTF-8 body. Text mime types only; 5 MB cap."`
+}
+
 type WriteItem struct {
 	Key               string   `json:"key,omitempty" jsonschema:"Issue key (e.g. PROJ-1). Required for update/delete/transition/comment/edit_comment."`
 	Project           string   `json:"project,omitempty" jsonschema:"Project key for create action."`
@@ -58,6 +68,9 @@ type WriteItem struct {
 
 	Links   []LinkItem   `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
 	Unlinks []UnlinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue."`
+
+	Attach *AttachItem `json:"attach,omitempty" jsonschema:"Upload one attachment to the issue under action=update."`
+	Detach string      `json:"detach,omitempty" jsonschema:"Attachment id to remove from the issue under action=update. Read from fields.attachment on a prior jira_read."`
 }
 
 type WriteArgs struct {
@@ -73,7 +86,7 @@ var writeTool = &mcp.Tool{
 
 Actions:
 - create: Create issues. Each item needs: project, summary, issue_type. Optional: description (Markdown), assignee, priority, labels, parent_key, links, fields_json.
-- update: Update issues. Each item needs: key. Provide fields to change: summary, description, assignee, priority, labels, parent_key, links, unlinks, fields_json.
+- update: Update issues. Each item needs: key. Provide fields to change: summary, description, assignee, priority, labels, parent_key, links, unlinks, fields_json, attach, detach.
 - delete: Delete issues. Each item needs: key.
 - transition: Transition issues. Each item needs: key, transition_id. Optional: comment (Markdown). Hint: Use jira_schema resource=transitions to find IDs.
 - comment: Add comments. Each item needs: key, comment (Markdown).
@@ -86,6 +99,10 @@ Creating issues:
 - If the issue type is invalid for the project, the error lists available types.
 
 All actions support dry_run=true to preview without executing.
+
+Attachments (under action=update):
+- attach: {filename, data}. Text mime types only (text/*, application/json/xml/yaml etc); 5 MB cap on data.
+- detach: attachment id from fields.attachment on a prior jira_read.
 
 Descriptions and comments expect Markdown by default and are converted to ADF via the v3 API. Do not round-trip a jira_read result straight into jira_write — old issues return legacy Jira wiki-markup, which is not Markdown. Wiki-markup tokens ({code}, {{inline}}, h1., etc.) are detected and rejected on the default path. To send wiki-markup deliberately, set description_format="wiki" or comment_format="wiki" — the write is then routed through the v2 API with the raw string.`,
 }
@@ -197,6 +214,56 @@ func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []U
 		out = append(out, fmt.Sprintf("  Unlinked link %s.", linkID))
 	}
 	return out
+}
+
+// applyAttach uploads item.Attach when set. Returns a single-element slice
+// for the success/error line, or nil when there's nothing to do. Mirrors the
+// applyLinks / applyUnlinks shape so writeUpdate can compose them uniformly.
+func (h *handlers) applyAttach(ctx context.Context, key string, att *AttachItem, dryRun bool) []string {
+	if att == nil {
+		return nil
+	}
+	if att.Filename == "" {
+		return []string{fmt.Sprintf("  ERROR: attach %s: filename is required.", key)}
+	}
+	if att.Data == "" {
+		return []string{fmt.Sprintf("  ERROR: attach %s: data is required.", key)}
+	}
+	if int64(len(att.Data)) > attachmentMaxBytes {
+		return []string{fmt.Sprintf("  ERROR: attach %s: data (%d bytes) exceeds the %d-byte cap.", key, len(att.Data), attachmentMaxBytes)}
+	}
+	declaredMIME := mime.TypeByExtension(strings.ToLower(path.Ext(att.Filename)))
+	if err := validateTextAttachment(declaredMIME, []byte(att.Data)); err != nil {
+		return []string{fmt.Sprintf("  ERROR: attach %s (%s): %v", key, att.Filename, err)}
+	}
+
+	if dryRun {
+		return []string{fmt.Sprintf("  Would attach %s to %s.", att.Filename, key)}
+	}
+
+	uploaded, err := h.client.PostAttachmentText(ctx, key, att.Filename, att.Data)
+	if err != nil {
+		return []string{fmt.Sprintf("  ERROR: attach %s (%s): %v", key, att.Filename, err)}
+	}
+	if uploaded == nil {
+		return []string{fmt.Sprintf("  Attached %s to %s.", att.Filename, key)}
+	}
+	return []string{fmt.Sprintf("  Attached %s to %s (id=%s).", uploaded.Filename, key, uploaded.ID)}
+}
+
+// applyDetach removes one attachment by id. Mirrors applyAttach in shape —
+// returns one line for the user, or nil when nothing to do.
+func (h *handlers) applyDetach(ctx context.Context, key, id string, dryRun bool) []string {
+	if id == "" {
+		return nil
+	}
+	if dryRun {
+		return []string{fmt.Sprintf("  Would detach attachment %s from %s.", id, key)}
+	}
+	if err := h.client.DeleteAttachment(ctx, id); err != nil {
+		return []string{fmt.Sprintf("  ERROR: detach %s (id=%s): %v", key, id, err)}
+	}
+	return []string{fmt.Sprintf("  Detached attachment %s from %s.", id, key)}
 }
 
 // applyLinks maps each LinkItem to a CreateIssueLinkInput as
@@ -700,16 +767,12 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool)
 	hasFieldUpdates := len(fields) > 0
 
 	if dryRun {
-		var head string
+		head := fmt.Sprintf("No field updates on %s.", item.Key)
 		if hasFieldUpdates {
 			data, _ := json.MarshalIndent(payload, "", "  ")
 			head = fmt.Sprintf("Would update %s with:\n%s", item.Key, string(data))
-		} else {
-			head = fmt.Sprintf("No field updates on %s.", item.Key)
 		}
-		var extra []string
-		extra = append(extra, h.applyUnlinks(ctx, item.Key, item.Unlinks, true)...)
-		extra = append(extra, h.applyLinks(ctx, item.Links, true)...)
+		extra := h.applyUpdateSubOps(ctx, item, true)
 		if len(extra) > 0 {
 			head += "\n" + strings.Join(extra, "\n")
 		}
@@ -731,13 +794,24 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool)
 		msg = fmt.Sprintf("No field updates on %s.", item.Key)
 	}
 
-	var extra []string
-	extra = append(extra, h.applyUnlinks(ctx, item.Key, item.Unlinks, false)...)
-	extra = append(extra, h.applyLinks(ctx, item.Links, false)...)
+	extra := h.applyUpdateSubOps(ctx, item, false)
 	if len(extra) > 0 {
 		msg += "\n" + strings.Join(extra, "\n")
 	}
 	return msg, nil
+}
+
+// applyUpdateSubOps runs the optional sub-ops on an update item (unlinks,
+// links, attach, detach) in a stable order. Per-op errors are collected as
+// lines; nothing short-circuits. Order: removals before additions, so
+// "swap one attachment for another" reads naturally in the result.
+func (h *handlers) applyUpdateSubOps(ctx context.Context, item WriteItem, dryRun bool) []string {
+	var out []string
+	out = append(out, h.applyUnlinks(ctx, item.Key, item.Unlinks, dryRun)...)
+	out = append(out, h.applyDetach(ctx, item.Key, item.Detach, dryRun)...)
+	out = append(out, h.applyLinks(ctx, item.Links, dryRun)...)
+	out = append(out, h.applyAttach(ctx, item.Key, item.Attach, dryRun)...)
+	return out
 }
 
 func (h *handlers) writeDelete(ctx context.Context, item WriteItem, dryRun bool) (string, error) {

@@ -3,6 +3,7 @@ package jiramcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,11 +13,13 @@ import (
 )
 
 type ReadArgs struct {
-	Keys []string `json:"keys,omitempty" jsonschema:"Issue keys to fetch (e.g. PROJ-1). Mutually exclusive with jql and resource."`
+	Keys []string `json:"keys,omitempty" jsonschema:"Issue keys to fetch (e.g. PROJ-1). Mutually exclusive with jql, resource, attachment_id."`
 
-	JQL string `json:"jql,omitempty" jsonschema:"JQL search query. Mutually exclusive with keys and resource."`
+	JQL string `json:"jql,omitempty" jsonschema:"JQL search query. Mutually exclusive with keys, resource, attachment_id."`
 
-	Resource string `json:"resource,omitempty" jsonschema:"Resource to list: projects, boards, sprints, sprint_issues. Mutually exclusive with keys and jql."`
+	Resource string `json:"resource,omitempty" jsonschema:"Resource to list: projects, boards, sprints, sprint_issues. Mutually exclusive with keys, jql, attachment_id."`
+
+	AttachmentID string `json:"attachment_id,omitempty" jsonschema:"Attachment id to fetch as text. Text mime types only; 5 MB cap. Mutually exclusive with keys, jql, resource."`
 
 	BoardID     int    `json:"board_id,omitempty" jsonschema:"Board ID. Required for resource=sprints."`
 	SprintID    int    `json:"sprint_id,omitempty" jsonschema:"Sprint ID. Required for resource=sprint_issues."`
@@ -32,15 +35,62 @@ type ReadArgs struct {
 	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Token for fetching the next page of JQL search results. Returned in previous search response."`
 }
 
+// readMode names the four mutually exclusive top-level branches of
+// jira_read. selectReadMode resolves it from a ReadArgs and reports the
+// "exactly one of ..." error when zero or many are set.
+type readMode int
+
+const (
+	readModeNone readMode = iota
+	readModeKeys
+	readModeJQL
+	readModeResource
+	readModeAttachment
+)
+
+// selectReadMode returns the picked mode and, on validation failure, a
+// user-facing message describing the problem. A non-empty message means the
+// caller should surface it as an error response without dispatching.
+func selectReadMode(args ReadArgs) (readMode, string) {
+	var picked readMode
+	count := 0
+	if len(args.Keys) > 0 {
+		picked = readModeKeys
+		count++
+	}
+	if args.JQL != "" {
+		picked = readModeJQL
+		count++
+	}
+	if args.Resource != "" {
+		picked = readModeResource
+		count++
+	}
+	if args.AttachmentID != "" {
+		picked = readModeAttachment
+		count++
+	}
+	switch count {
+	case 0:
+		return readModeNone, "Provide exactly one of: keys, jql, resource, or attachment_id. Example: {\"keys\": [\"PROJ-1\"]} or {\"jql\": \"project = PROJ\"} or {\"resource\": \"projects\"} or {\"attachment_id\": \"10100\"}"
+	case 1:
+		return picked, ""
+	default:
+		return readModeNone, "Provide exactly one of: keys, jql, resource, or attachment_id — not multiple."
+	}
+}
+
 var readTool = &mcp.Tool{
 	Name: "jira_read",
-	Description: `Fetch JIRA data. Three modes (provide exactly one):
+	Description: `Fetch JIRA data. Four modes (provide exactly one):
 
 1. keys — Fetch issues by key. Pass one or more issue keys like ["PROJ-1", "PROJ-2"].
 2. jql — Search issues with JQL query. Supports all JIRA JQL syntax.
 3. resource — List a resource type: "projects", "boards", "sprints" (needs board_id), "sprint_issues" (needs sprint_id).
+4. attachment_id — Fetch one attachment's content as text. Text mime types only (text/*, application/json/xml/yaml). 5 MB cap.
 
 Common options: fields (comma-separated), expand, limit (default 100), start_at.
+When an issue has attachments, their metadata is returned under fields.attachment. Use mode=attachment_id to fetch a body.
 Hint: Use jira_schema resource=transitions with an issue_key to find valid transition IDs before transitioning.
 
 Descriptions and comments for older issues are returned in Jira wiki-markup, not Markdown. Do not feed a description/comment string from jira_read straight back into jira_write — the default write path expects Markdown and will reject recognised wiki-markup tokens. Either convert to Markdown, or set description_format="wiki" / comment_format="wiki" on the write to preserve wiki-markup input.`,
@@ -51,32 +101,66 @@ func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args 
 		args.Limit = 100
 	}
 
-	modes := 0
-	if len(args.Keys) > 0 {
-		modes++
-	}
-	if args.JQL != "" {
-		modes++
-	}
-	if args.Resource != "" {
-		modes++
+	mode, problem := selectReadMode(args)
+	if problem != "" {
+		return textResult(problem, true), nil, nil
 	}
 
-	if modes == 0 {
-		return textResult("Provide exactly one of: keys, jql, or resource. Example: {\"keys\": [\"PROJ-1\"]} or {\"jql\": \"project = PROJ\"} or {\"resource\": \"projects\"}", true), nil, nil
-	}
-	if modes > 1 {
-		return textResult("Provide exactly one of: keys, jql, or resource — not multiple.", true), nil, nil
-	}
-
-	switch {
-	case len(args.Keys) > 0:
+	switch mode {
+	case readModeKeys:
 		return h.readByKeys(ctx, args), nil, nil
-	case args.JQL != "":
+	case readModeJQL:
 		return h.readByJQL(ctx, args), nil, nil
-	default:
+	case readModeResource:
 		return h.readResource(ctx, args), nil, nil
+	case readModeAttachment:
+		return h.readAttachment(ctx, args.AttachmentID), nil, nil
+	default:
+		return textResult("Internal error: unhandled read mode", true), nil, nil
 	}
+}
+
+// readAttachment fetches one attachment's body and returns it as text after
+// validating the (declared mime, body) pair against the v1 text policy.
+// Single-attachment per call — multi-fetch is by design omitted to keep the
+// blast radius small (5 MB per call rather than 5 MB × N).
+func (h *handlers) readAttachment(ctx context.Context, id string) *mcp.CallToolResult {
+	meta, err := h.client.GetAttachmentMeta(ctx, id)
+	if err != nil {
+		return textResult(fmt.Sprintf("Failed to read attachment %s: %v", id, err), true)
+	}
+	if meta == nil {
+		return textResult(fmt.Sprintf("Failed to read attachment %s: empty metadata", id), true)
+	}
+
+	// Fast-path: reject on declared mime so we don't waste a download call.
+	if meta.MimeType != "" && !isAllowedTextMime(meta.MimeType) {
+		return textResult(fmt.Sprintf(
+			"Attachment %s (%s) has mime type %q. text attachments only in v1 — fetch the binary from Jira directly.",
+			id, meta.Filename, meta.MimeType,
+		), true)
+	}
+
+	body, err := h.client.GetAttachmentBody(ctx, id, attachmentMaxBytes)
+	if err != nil {
+		if errors.Is(err, jira.ErrAttachmentTooLarge) {
+			return textResult(fmt.Sprintf(
+				"Attachment %s (%s, %d bytes) exceeds the %d-byte cap.",
+				id, meta.Filename, meta.Size, attachmentMaxBytes,
+			), true)
+		}
+		return textResult(fmt.Sprintf("Failed to download attachment %s: %v", id, err), true)
+	}
+
+	if err := validateTextAttachment(meta.MimeType, body); err != nil {
+		return textResult(fmt.Sprintf(
+			"Attachment %s (%s) rejected: %v",
+			id, meta.Filename, err,
+		), true)
+	}
+
+	header := fmt.Sprintf("Attachment %s: filename=%s mime=%s size=%d\n---\n", id, meta.Filename, meta.MimeType, meta.Size)
+	return textResult(header+string(body), false)
 }
 
 func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolResult {
@@ -332,10 +416,53 @@ func issueToMap(issue *jira.Issue) map[string]any {
 		if !time.Time(issue.Fields.Updated).IsZero() {
 			fields["updated"] = time.Time(issue.Fields.Updated).Format(time.RFC3339)
 		}
+		if len(issue.Fields.Attachments) > 0 {
+			atts := make([]map[string]any, 0, len(issue.Fields.Attachments))
+			for _, a := range issue.Fields.Attachments {
+				if a == nil {
+					continue
+				}
+				atts = append(atts, attachmentToMap(a))
+			}
+			if len(atts) > 0 {
+				fields["attachment"] = atts
+			}
+		}
 		m["fields"] = fields
 	}
 
 	return m
+}
+
+// attachmentToMap renders a single Jira attachment as the response shape
+// callers see. Created is emitted as RFC3339 when parseable; otherwise the
+// raw Jira-issued string passes through.
+func attachmentToMap(a *jira.Attachment) map[string]any {
+	out := map[string]any{
+		"id":        a.ID,
+		"filename":  a.Filename,
+		"size":      a.Size,
+		"mime_type": a.MimeType,
+		"created":   formatJiraTimeString(a.Created),
+	}
+	if a.Author != nil {
+		out["author"] = userToMap(a.Author)
+	}
+	return out
+}
+
+// formatJiraTimeString parses Jira's wire layout for timestamp strings and
+// re-emits them as RFC3339 for consistency with the rest of issueToMap.
+// Unparseable input is returned unchanged so we never drop information.
+func formatJiraTimeString(s string) string {
+	if s == "" {
+		return s
+	}
+	t, err := time.Parse("2006-01-02T15:04:05.999-0700", s)
+	if err != nil {
+		return s
+	}
+	return t.Format(time.RFC3339)
 }
 
 func formatReadResult(summary string, results []map[string]any, errors []string) *mcp.CallToolResult {

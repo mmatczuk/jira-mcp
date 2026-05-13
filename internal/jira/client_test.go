@@ -581,3 +581,227 @@ func TestGetFieldOptions_NoContexts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, opts)
 }
+
+// --- Attachments ---
+
+func TestGetAttachmentMeta_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "10100",
+			"filename": "build.log",
+			"size": 1234,
+			"mimeType": "text/plain",
+			"created": "2025-03-12T10:23:45.000-0700",
+			"content": "https://jira.example.com/secure/attachment/10100/build.log"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	att, err := c.GetAttachmentMeta(context.Background(), "10100")
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/attachment/10100", gotPath)
+	assert.Equal(t, "GET", gotMethod)
+	require.NotNil(t, att)
+	assert.Equal(t, "10100", att.ID)
+	assert.Equal(t, "build.log", att.Filename)
+	assert.Equal(t, 1234, att.Size)
+	assert.Equal(t, "text/plain", att.MimeType)
+}
+
+func TestGetAttachmentMeta_NumericID(t *testing.T) {
+	// Jira Cloud's rest/api/3/attachment/{id} returns id as a JSON number,
+	// not a string. Ensure we decode it without erroring and surface the
+	// canonical string form on the returned Attachment.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": 10100,
+			"filename": "build.log",
+			"size": 72,
+			"mimeType": "text/plain",
+			"created": "2025-03-12T10:23:45.000-0700"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	att, err := c.GetAttachmentMeta(context.Background(), "10100")
+	require.NoError(t, err)
+	require.NotNil(t, att)
+	assert.Equal(t, "10100", att.ID)
+	assert.Equal(t, "build.log", att.Filename)
+	assert.Equal(t, 72, att.Size)
+	assert.Equal(t, "text/plain", att.MimeType)
+}
+
+func TestGetAttachmentMeta_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetAttachmentMeta(context.Background(), "missing")
+	require.Error(t, err)
+}
+
+func TestGetAttachmentMeta_RetriesOn429(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"10100","filename":"f.txt"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	att, err := c.GetAttachmentMeta(context.Background(), "10100")
+	require.NoError(t, err)
+	assert.Equal(t, "f.txt", att.Filename)
+	assert.Equal(t, 2, calls)
+}
+
+func TestGetAttachmentBody_Success(t *testing.T) {
+	body := []byte("hello, world\n")
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetAttachmentBody(context.Background(), "10100", 1024)
+	require.NoError(t, err)
+	assert.Equal(t, body, got)
+	assert.Contains(t, gotPath, "/attachment/")
+	assert.Contains(t, gotPath, "10100")
+}
+
+func TestGetAttachmentBody_OverCapReturnsSentinel(t *testing.T) {
+	// Body is 6 bytes; cap is 5.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("123456"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetAttachmentBody(context.Background(), "10100", 5)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAttachmentTooLarge)
+}
+
+func TestGetAttachmentBody_ExactlyAtCap(t *testing.T) {
+	// Body is 5 bytes; cap is 5. Must succeed (cap is inclusive).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("12345"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetAttachmentBody(context.Background(), "10100", 5)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("12345"), got)
+}
+
+func TestGetAttachmentBody_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetAttachmentBody(context.Background(), "missing", 1024)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrAttachmentTooLarge)
+}
+
+func TestPostAttachmentText_Success(t *testing.T) {
+	var gotPath, gotMethod, gotXSRF string
+	var gotBody []byte
+	var gotContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotXSRF = r.Header.Get("X-Atlassian-Token")
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"20001","filename":"out.log","size":3,"mimeType":"text/plain"}]`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	att, err := c.PostAttachmentText(context.Background(), "PROJ-1", "out.log", "abc")
+	require.NoError(t, err)
+	require.NotNil(t, att)
+	assert.Equal(t, "20001", att.ID)
+	assert.Equal(t, "out.log", att.Filename)
+
+	// Endpoint shape.
+	assert.Contains(t, gotPath, "/issue/PROJ-1/attachments")
+	assert.Equal(t, "POST", gotMethod)
+	// XSRF bypass header set by go-jira's multipart helper.
+	assert.Equal(t, "nocheck", gotXSRF)
+	// Multipart Content-Type with boundary, body contains the data.
+	assert.Contains(t, gotContentType, "multipart/form-data")
+	assert.Contains(t, string(gotBody), "abc")
+	assert.Contains(t, string(gotBody), `name="file"`)
+	assert.Contains(t, string(gotBody), `filename="out.log"`)
+}
+
+func TestPostAttachmentText_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.PostAttachmentText(context.Background(), "MISSING-1", "f.txt", "x")
+	require.Error(t, err)
+}
+
+func TestDeleteAttachment_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteAttachment(context.Background(), "10100")
+	require.NoError(t, err)
+	assert.Contains(t, gotPath, "/attachment/10100")
+	assert.Equal(t, "DELETE", gotMethod)
+}
+
+func TestDeleteAttachment_RetriesOn503(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteAttachment(context.Background(), "10100")
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls)
+}
