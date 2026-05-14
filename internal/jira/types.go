@@ -14,6 +14,7 @@ type (
 	GetQueryOptions      = jira.GetQueryOptions
 	Issue                = jira.Issue
 	IssueFields          = jira.IssueFields
+	IssueLink            = jira.IssueLink
 	IssueType            = jira.IssueType
 	Priority             = jira.Priority
 	ProjectList          = jira.ProjectList

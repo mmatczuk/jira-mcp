@@ -297,6 +297,27 @@ func userToMap(u *jira.User) map[string]any {
 	}
 }
 
+func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) {
+	if l == nil {
+		return nil, false
+	}
+	var from, to string
+	switch {
+	case l.OutwardIssue != nil:
+		from, to = activeKey, l.OutwardIssue.Key
+	case l.InwardIssue != nil:
+		from, to = l.InwardIssue.Key, activeKey
+	default:
+		return nil, false
+	}
+	return map[string]any{
+		"id":   l.ID,
+		"type": l.Type.Name,
+		"from": from,
+		"to":   to,
+	}, true
+}
+
 func issueToMap(issue *jira.Issue) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
@@ -325,6 +346,17 @@ func issueToMap(issue *jira.Issue) map[string]any {
 		}
 		if issue.Fields.Labels != nil {
 			fields["labels"] = issue.Fields.Labels
+		}
+		if len(issue.Fields.IssueLinks) > 0 {
+			links := make([]map[string]any, 0, len(issue.Fields.IssueLinks))
+			for _, l := range issue.Fields.IssueLinks {
+				if link, ok := issueLinkToMap(issue.Key, l); ok {
+					links = append(links, link)
+				}
+			}
+			if len(links) > 0 {
+				fields["issuelinks"] = links
+			}
 		}
 		if !time.Time(issue.Fields.Created).IsZero() {
 			fields["created"] = time.Time(issue.Fields.Created).Format(time.RFC3339)
