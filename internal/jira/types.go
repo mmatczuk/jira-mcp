@@ -17,6 +17,7 @@ type (
 	Issue                = jira.Issue
 	IssueFields          = jira.IssueFields
 	IssueType            = jira.IssueType
+	Parent               = jira.Parent
 	Priority             = jira.Priority
 	ProjectList          = jira.ProjectList
 	SearchOptions        = jira.SearchOptions
