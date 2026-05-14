@@ -391,6 +391,33 @@ func TestIssueToMap_AllFields(t *testing.T) {
 	assert.Equal(t, updated.Format(time.RFC3339), fields["updated"])
 }
 
+func TestIssueToMap_Parent(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			Parent:  &jira.Parent{ID: "1000", Key: "PROJ-9"},
+		},
+	}
+
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	assert.Equal(t, map[string]any{"id": "1000", "key": "PROJ-9"}, fields["parent"])
+}
+
+func TestIssueToMap_NoParent(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+		},
+	}
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	_, has := fields["parent"]
+	assert.False(t, has)
+}
+
 func TestIssueToMap_NilFields(t *testing.T) {
 	issue := &jira.Issue{Key: "X-1", ID: "1"}
 	m := issueToMap(issue)

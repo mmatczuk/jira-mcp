@@ -320,6 +320,12 @@ func issueToMap(issue *jira.Issue) map[string]any {
 		if issue.Fields.Priority != nil {
 			fields["priority"] = issue.Fields.Priority.Name
 		}
+		if issue.Fields.Parent != nil {
+			fields["parent"] = map[string]any{
+				"id":  issue.Fields.Parent.ID,
+				"key": issue.Fields.Parent.Key,
+			}
+		}
 		if issue.Fields.Description != "" {
 			fields["description"] = issue.Fields.Description
 		}
