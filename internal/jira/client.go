@@ -164,6 +164,67 @@ type CreateIssueLinkInput struct {
 	Comment      *IssueLinkComment
 }
 
+// RemoteLink represents an entry returned by
+// GET /rest/api/3/issue/{issueIdOrKey}/remotelink — a web link from a Jira
+// issue to an external resource (URL, document, ticket in another system).
+// Internal issue-to-issue links use the separate /issueLink endpoint and
+// IssueLinkType type above.
+type RemoteLink struct {
+	ID           int              `json:"id"`
+	Self         string           `json:"self,omitempty"`
+	GlobalID     string           `json:"globalId,omitempty"`
+	Relationship string           `json:"relationship,omitempty"`
+	Application  *RemoteLinkApp   `json:"application,omitempty"`
+	Object       RemoteLinkObject `json:"object"`
+}
+
+// RemoteLinkApp is the application that owns the linked resource.
+type RemoteLinkApp struct {
+	Type string `json:"type,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// RemoteLinkObject is the linked resource itself. URL and Title are the only
+// fields Jira guarantees; the rest are optional.
+type RemoteLinkObject struct {
+	URL     string            `json:"url"`
+	Title   string            `json:"title"`
+	Summary string            `json:"summary,omitempty"`
+	Icon    *RemoteLinkIcon   `json:"icon,omitempty"`
+	Status  *RemoteLinkStatus `json:"status,omitempty"`
+}
+
+// RemoteLinkIcon is the icon shown for the link in the Jira UI.
+type RemoteLinkIcon struct {
+	URL16x16 string `json:"url16x16,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Link     string `json:"link,omitempty"`
+}
+
+// RemoteLinkStatus describes the resolved/unresolved state of the linked
+// resource, when the external system reports one.
+type RemoteLinkStatus struct {
+	Resolved bool            `json:"resolved"`
+	Icon     *RemoteLinkIcon `json:"icon,omitempty"`
+}
+
+// GetRemoteLinks returns the remote (web) links attached to an issue via
+// GET /rest/api/3/issue/{issueIdOrKey}/remotelink. The response is an array;
+// an issue with no remote links returns an empty slice, not an error.
+func (c *Client) GetRemoteLinks(ctx context.Context, issueKey string) ([]RemoteLink, error) {
+	var links []RemoteLink
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/issue/%s/remotelink", url.PathEscape(issueKey))
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, &links)
+		return resp, err
+	})
+	return links, err
+}
+
 // GetIssueLinkTypes returns the issue link types configured on the Jira
 // instance. Used by jira_schema link_types so callers can discover the
 // (name, inward, outward) verb triples needed to construct unambiguous

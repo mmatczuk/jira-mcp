@@ -36,4 +36,5 @@ type JiraClient interface {
 	CreateIssueLink(ctx context.Context, in jira.CreateIssueLinkInput) error
 	DeleteIssueLink(ctx context.Context, linkID string) error
 	GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkType, error)
+	GetRemoteLinks(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
 }

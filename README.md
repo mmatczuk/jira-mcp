@@ -8,7 +8,7 @@ jira-mcp gives the model exactly what it needs:
 
 | Tool | What it does |
 |---|---|
-| `jira_read` | Fetch issues by key, search by JQL, list projects/boards/sprints |
+| `jira_read` | Fetch issues by key, search by JQL, list projects/boards/sprints, get remote links |
 | `jira_write` | Create, update, delete, transition, comment, link, set parent — Markdown by default, supports `dry_run` |
 | `jira_schema` | Discover fields, transitions, link types, and allowed values |
 | `jira_user_search` | Find users by name or email, get account IDs for assignment |

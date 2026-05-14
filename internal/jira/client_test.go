@@ -432,6 +432,87 @@ func TestGetIssueLinkTypes_Error_404(t *testing.T) {
 	require.Error(t, err)
 }
 
+// --- GetRemoteLinks ---
+
+func TestGetRemoteLinks_Success(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{
+				"id": 10000,
+				"self": "https://example.atlassian.net/rest/api/3/issue/PROJ-1/remotelink/10000",
+				"globalId": "system=https://example.com&id=1",
+				"application": {"type": "com.acme.tracker", "name": "My Tracker"},
+				"relationship": "causes",
+				"object": {
+					"url": "https://example.com/ticket/1",
+					"title": "EXT-1",
+					"summary": "External issue",
+					"icon": {"url16x16": "https://example.com/icon.png", "title": "Ticket"},
+					"status": {"resolved": true, "icon": {"url16x16": "https://example.com/s.png", "title": "Done", "link": "https://example.com/s"}}
+				}
+			},
+			{
+				"id": 10001,
+				"object": {"url": "https://example.com/doc", "title": "Spec"}
+			}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetRemoteLinks(context.Background(), "PROJ-1")
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issue/PROJ-1/remotelink", gotPath)
+	assert.Equal(t, "GET", gotMethod)
+	require.Len(t, got, 2)
+
+	assert.Equal(t, 10000, got[0].ID)
+	assert.Equal(t, "system=https://example.com&id=1", got[0].GlobalID)
+	assert.Equal(t, "causes", got[0].Relationship)
+	require.NotNil(t, got[0].Application)
+	assert.Equal(t, "My Tracker", got[0].Application.Name)
+	assert.Equal(t, "com.acme.tracker", got[0].Application.Type)
+	assert.Equal(t, "https://example.com/ticket/1", got[0].Object.URL)
+	assert.Equal(t, "EXT-1", got[0].Object.Title)
+	assert.Equal(t, "External issue", got[0].Object.Summary)
+	require.NotNil(t, got[0].Object.Status)
+	assert.True(t, got[0].Object.Status.Resolved)
+
+	assert.Equal(t, 10001, got[1].ID)
+	assert.Equal(t, "https://example.com/doc", got[1].Object.URL)
+	assert.Equal(t, "Spec", got[1].Object.Title)
+	assert.Nil(t, got[1].Application)
+	assert.Nil(t, got[1].Object.Status)
+}
+
+func TestGetRemoteLinks_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetRemoteLinks(context.Background(), "PROJ-1")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestGetRemoteLinks_Error_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetRemoteLinks(context.Background(), "PROJ-1")
+	require.Error(t, err)
+}
+
 // --- CreateIssueLink ---
 
 func TestCreateIssueLink_NoComment(t *testing.T) {

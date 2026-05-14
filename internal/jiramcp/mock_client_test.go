@@ -38,6 +38,7 @@ type mockClient struct {
 	CreateIssueLinkFn         func(ctx context.Context, in jira.CreateIssueLinkInput) error
 	DeleteIssueLinkFn         func(ctx context.Context, linkID string) error
 	GetIssueLinkTypesFn       func(ctx context.Context) ([]jira.IssueLinkType, error)
+	GetRemoteLinksFn          func(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
 }
 
 func (m *mockClient) GetMyself(ctx context.Context) (*jira.User, error) {
@@ -227,4 +228,11 @@ func (m *mockClient) GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkTyp
 		panic("mockClient.GetIssueLinkTypes called but GetIssueLinkTypesFn not set")
 	}
 	return m.GetIssueLinkTypesFn(ctx)
+}
+
+func (m *mockClient) GetRemoteLinks(ctx context.Context, issueKey string) ([]jira.RemoteLink, error) {
+	if m.GetRemoteLinksFn == nil {
+		panic(fmt.Sprintf("mockClient.GetRemoteLinks called but GetRemoteLinksFn not set (issueKey=%s)", issueKey))
+	}
+	return m.GetRemoteLinksFn(ctx, issueKey)
 }

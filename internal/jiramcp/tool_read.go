@@ -18,8 +18,10 @@ type ReadArgs struct {
 
 	Resource string `json:"resource,omitempty" jsonschema:"Resource to list: projects, boards, sprints, sprint_issues. Mutually exclusive with keys and jql."`
 
-	BoardID     int    `json:"board_id,omitempty" jsonschema:"Board ID. Required for resource=sprints."`
-	SprintID    int    `json:"sprint_id,omitempty" jsonschema:"Sprint ID. Required for resource=sprint_issues."`
+	BoardID  int    `json:"board_id,omitempty" jsonschema:"Board ID. Required for resource=sprints."`
+	SprintID int    `json:"sprint_id,omitempty" jsonschema:"Sprint ID. Required for resource=sprint_issues."`
+	IssueKey string `json:"issue_key,omitempty" jsonschema:"Issue key. Required for resource=remote_links."`
+
 	ProjectKey  string `json:"project_key,omitempty" jsonschema:"Filter boards by project key."`
 	BoardName   string `json:"board_name,omitempty" jsonschema:"Filter boards by name substring."`
 	BoardType   string `json:"board_type,omitempty" jsonschema:"Filter boards by type: scrum, kanban."`
@@ -38,7 +40,7 @@ var readTool = &mcp.Tool{
 
 1. keys — Fetch issues by key. Pass one or more issue keys like ["PROJ-1", "PROJ-2"].
 2. jql — Search issues with JQL query. Supports all JIRA JQL syntax.
-3. resource — List a resource type: "projects", "boards", "sprints" (needs board_id), "sprint_issues" (needs sprint_id).
+3. resource — List a resource type: "projects", "boards", "sprints" (needs board_id), "sprint_issues" (needs sprint_id), "remote_links" (needs issue_key — web links from an issue to external resources, not internal issue-to-issue links).
 
 Common options: fields (comma-separated), expand, limit (default 100), start_at.
 Hint: Use jira_schema resource=transitions with an issue_key to find valid transition IDs before transitioning.
@@ -168,8 +170,10 @@ func (h *handlers) readResource(ctx context.Context, args ReadArgs) *mcp.CallToo
 		return h.readSprints(ctx, args)
 	case "sprint_issues":
 		return h.readSprintIssues(ctx, args)
+	case "remote_links":
+		return h.readRemoteLinks(ctx, args)
 	default:
-		return textResult(fmt.Sprintf("Unknown resource %q. Valid: projects, boards, sprints, sprint_issues.", args.Resource), true)
+		return textResult(fmt.Sprintf("Unknown resource %q. Valid: projects, boards, sprints, sprint_issues, remote_links.", args.Resource), true)
 	}
 }
 
@@ -288,6 +292,57 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 	summary += "\nNote: Sprint issues endpoint returns a single page. For large sprints, use jira_read with jql=\"sprint = <sprint_id>\" for full pagination."
 
 	return formatReadResult(summary, results, nil)
+}
+
+func (h *handlers) readRemoteLinks(ctx context.Context, args ReadArgs) *mcp.CallToolResult {
+	if args.IssueKey == "" {
+		return textResult("issue_key is required for resource=remote_links. Hint: pass the issue key whose remote links you want, e.g. {\"resource\": \"remote_links\", \"issue_key\": \"PROJ-1\"}.", true)
+	}
+
+	links, err := h.client.GetRemoteLinks(ctx, args.IssueKey)
+	if err != nil {
+		return textResult(fmt.Sprintf("Failed to get remote links for %s: %v", args.IssueKey, err), true)
+	}
+
+	var results []map[string]any
+	for _, l := range links {
+		results = append(results, remoteLinkToMap(l))
+	}
+
+	return formatReadResult(fmt.Sprintf("Found %d remote link(s) on %s", len(results), args.IssueKey), results, nil)
+}
+
+func remoteLinkToMap(l jira.RemoteLink) map[string]any {
+	m := map[string]any{
+		"id":  l.ID,
+		"url": l.Object.URL,
+	}
+	if l.Object.Title != "" {
+		m["title"] = l.Object.Title
+	}
+	if l.Object.Summary != "" {
+		m["summary"] = l.Object.Summary
+	}
+	if l.GlobalID != "" {
+		m["globalId"] = l.GlobalID
+	}
+	if l.Relationship != "" {
+		m["relationship"] = l.Relationship
+	}
+	if l.Application != nil && (l.Application.Name != "" || l.Application.Type != "") {
+		app := map[string]any{}
+		if l.Application.Name != "" {
+			app["name"] = l.Application.Name
+		}
+		if l.Application.Type != "" {
+			app["type"] = l.Application.Type
+		}
+		m["application"] = app
+	}
+	if l.Object.Status != nil {
+		m["resolved"] = l.Object.Status.Resolved
+	}
+	return m
 }
 
 func userToMap(u *jira.User) map[string]any {

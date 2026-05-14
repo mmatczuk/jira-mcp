@@ -343,6 +343,74 @@ func TestReadSprintIssues_NoSprintID(t *testing.T) {
 	assert.Contains(t, text, "sprint_id is required")
 }
 
+// --- readResource: remote_links ---
+
+func TestReadRemoteLinks_Success(t *testing.T) {
+	mc := &mockClient{
+		GetRemoteLinksFn: func(_ context.Context, issueKey string) ([]jira.RemoteLink, error) {
+			assert.Equal(t, "PROJ-1", issueKey)
+			return []jira.RemoteLink{
+				{
+					ID:           10000,
+					Self:         "https://example.atlassian.net/rest/api/3/issue/PROJ-1/remotelink/10000",
+					GlobalID:     "system=https://example.com&id=1",
+					Relationship: "causes",
+					Application:  &jira.RemoteLinkApp{Type: "com.acme.tracker", Name: "My Tracker"},
+					Object: jira.RemoteLinkObject{
+						URL:     "https://example.com/ticket/1",
+						Title:   "EXT-1",
+						Summary: "External issue",
+						Status:  &jira.RemoteLinkStatus{Resolved: true},
+					},
+				},
+				{
+					ID:     10001,
+					Object: jira.RemoteLinkObject{URL: "https://example.com/doc", Title: "Spec"},
+				},
+			}, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{Resource: "remote_links", IssueKey: "PROJ-1"})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Found 2 remote link(s) on PROJ-1")
+	assert.Contains(t, text, "https://example.com/ticket/1")
+	assert.Contains(t, text, "EXT-1")
+	assert.Contains(t, text, "My Tracker")
+	assert.Contains(t, text, "https://example.com/doc")
+}
+
+func TestReadRemoteLinks_Empty(t *testing.T) {
+	mc := &mockClient{
+		GetRemoteLinksFn: func(context.Context, string) ([]jira.RemoteLink, error) {
+			return nil, nil
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{Resource: "remote_links", IssueKey: "PROJ-1"})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Found 0 remote link(s) on PROJ-1")
+}
+
+func TestReadRemoteLinks_NoIssueKey(t *testing.T) {
+	h := &handlers{client: &mockClient{}}
+	text, isErr := callRead(t, h, ReadArgs{Resource: "remote_links"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "issue_key is required")
+}
+
+func TestReadRemoteLinks_Error(t *testing.T) {
+	mc := &mockClient{
+		GetRemoteLinksFn: func(context.Context, string) ([]jira.RemoteLink, error) {
+			return nil, fmt.Errorf("boom")
+		},
+	}
+	h := &handlers{client: mc}
+	text, isErr := callRead(t, h, ReadArgs{Resource: "remote_links", IssueKey: "PROJ-1"})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "boom")
+}
+
 // --- readResource: unknown ---
 
 func TestReadResource_Unknown(t *testing.T) {
