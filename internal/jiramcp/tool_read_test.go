@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	gojira "github.com/andygrunwald/go-jira"
 	"github.com/mmatczuk/jira-mcp/internal/jira"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -539,6 +540,91 @@ func TestIssueToMap_NoParent(t *testing.T) {
 	fields := m["fields"].(map[string]any)
 	_, has := fields["parent"]
 	assert.False(t, has)
+}
+
+func TestIssueToMap_IssueLinks(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			IssueLinks: []*jira.IssueLink{
+				{
+					ID:           "5001",
+					Type:         gojira.IssueLinkType{Name: "Blocks"},
+					OutwardIssue: &jira.Issue{Key: "PROJ-9"},
+				},
+				{
+					ID:          "5002",
+					Type:        gojira.IssueLinkType{Name: "Duplicates"},
+					InwardIssue: &jira.Issue{Key: "PROJ-2"},
+				},
+			},
+		},
+	}
+
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	assert.Equal(t, []map[string]any{
+		{"id": "5001", "type": "Blocks", "from": "PROJ-1", "to": "PROJ-9"},
+		{"id": "5002", "type": "Duplicates", "from": "PROJ-2", "to": "PROJ-1"},
+	}, fields["issuelinks"])
+}
+
+func TestIssueToMap_IssueLinks_SkipsMalformed(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			IssueLinks: []*jira.IssueLink{
+				{
+					ID:           "5001",
+					Type:         gojira.IssueLinkType{Name: "Blocks"},
+					OutwardIssue: &jira.Issue{Key: "PROJ-9"},
+				},
+				{
+					ID:   "bad",
+					Type: gojira.IssueLinkType{Name: "Relates"},
+					// both OutwardIssue and InwardIssue nil — malformed
+				},
+				nil,
+				{
+					ID:          "5002",
+					Type:        gojira.IssueLinkType{Name: "Duplicates"},
+					InwardIssue: &jira.Issue{Key: "PROJ-2"},
+				},
+			},
+		},
+	}
+
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	assert.Equal(t, []map[string]any{
+		{"id": "5001", "type": "Blocks", "from": "PROJ-1", "to": "PROJ-9"},
+		{"id": "5002", "type": "Duplicates", "from": "PROJ-2", "to": "PROJ-1"},
+	}, fields["issuelinks"])
+}
+
+func TestIssueToMap_NoIssueLinks(t *testing.T) {
+	t.Run("nil slice", func(t *testing.T) {
+		issue := &jira.Issue{Key: "PROJ-1", Fields: &jira.IssueFields{Summary: "x"}}
+		m := issueToMap(issue)
+		fields := m["fields"].(map[string]any)
+		_, has := fields["issuelinks"]
+		assert.False(t, has)
+	})
+	t.Run("empty slice", func(t *testing.T) {
+		issue := &jira.Issue{
+			Key: "PROJ-1",
+			Fields: &jira.IssueFields{
+				Summary:    "x",
+				IssueLinks: []*jira.IssueLink{},
+			},
+		}
+		m := issueToMap(issue)
+		fields := m["fields"].(map[string]any)
+		_, has := fields["issuelinks"]
+		assert.False(t, has)
+	})
 }
 
 func TestIssueToMap_NilFields(t *testing.T) {
