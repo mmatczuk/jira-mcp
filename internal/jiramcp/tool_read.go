@@ -297,6 +297,17 @@ func userToMap(u *jira.User) map[string]any {
 	}
 }
 
+func commentToMap(c *jira.Comment) map[string]any {
+	m := map[string]any{
+		"id":      c.ID,
+		"author":  userToMap(&c.Author),
+		"body":    c.Body,
+		"created": c.Created,
+		"updated": c.Updated,
+	}
+	return m
+}
+
 func issueToMap(issue *jira.Issue) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
@@ -325,6 +336,17 @@ func issueToMap(issue *jira.Issue) map[string]any {
 		}
 		if issue.Fields.Labels != nil {
 			fields["labels"] = issue.Fields.Labels
+		}
+		if issue.Fields.Comments != nil {
+			comments := make([]map[string]any, 0, len(issue.Fields.Comments.Comments))
+			for _, c := range issue.Fields.Comments.Comments {
+				if c != nil {
+					comments = append(comments, commentToMap(c))
+				}
+			}
+			if len(comments) > 0 {
+				fields["comment"] = comments
+			}
 		}
 		if !time.Time(issue.Fields.Created).IsZero() {
 			fields["created"] = time.Time(issue.Fields.Created).Format(time.RFC3339)

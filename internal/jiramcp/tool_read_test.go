@@ -391,6 +391,61 @@ func TestIssueToMap_AllFields(t *testing.T) {
 	assert.Equal(t, updated.Format(time.RFC3339), fields["updated"])
 }
 
+func TestIssueToMap_Comments(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			Comments: &jira.Comments{
+				Comments: []*jira.Comment{
+					{
+						ID:      "100",
+						Author:  jira.User{DisplayName: "Alice", AccountID: "abc"},
+						Body:    "first comment",
+						Created: "2025-01-15T10:00:00.000+0000",
+						Updated: "2025-01-15T10:05:00.000+0000",
+					},
+					nil,
+					{
+						ID:     "101",
+						Author: jira.User{DisplayName: "Bob", AccountID: "def"},
+						Body:   "second comment",
+					},
+				},
+			},
+		},
+	}
+
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	comments, ok := fields["comment"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, comments, 2)
+
+	assert.Equal(t, "100", comments[0]["id"])
+	assert.Equal(t, "first comment", comments[0]["body"])
+	assert.Equal(t, "2025-01-15T10:00:00.000+0000", comments[0]["created"])
+	assert.Equal(t, "2025-01-15T10:05:00.000+0000", comments[0]["updated"])
+	assert.Equal(t, map[string]any{"displayName": "Alice", "accountId": "abc"}, comments[0]["author"])
+
+	assert.Equal(t, "101", comments[1]["id"])
+	assert.Equal(t, "second comment", comments[1]["body"])
+}
+
+func TestIssueToMap_NoComments(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary:  "x",
+			Comments: &jira.Comments{Comments: []*jira.Comment{}},
+		},
+	}
+	m := issueToMap(issue)
+	fields := m["fields"].(map[string]any)
+	_, has := fields["comment"]
+	assert.False(t, has)
+}
+
 func TestIssueToMap_NilFields(t *testing.T) {
 	issue := &jira.Issue{Key: "X-1", ID: "1"}
 	m := issueToMap(issue)

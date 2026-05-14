@@ -8,6 +8,8 @@ import "github.com/andygrunwald/go-jira"
 type (
 	Board                = jira.Board
 	BoardListOptions     = jira.BoardListOptions
+	Comment              = jira.Comment
+	Comments             = jira.Comments
 	Field                = jira.Field
 	FieldSchema          = jira.FieldSchema
 	GetAllSprintsOptions = jira.GetAllSprintsOptions
