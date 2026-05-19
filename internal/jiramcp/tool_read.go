@@ -91,22 +91,26 @@ func (h *handlers) handleRead(ctx context.Context, _ *mcp.CallToolRequest, args 
 	}
 }
 
-// customFieldRenderer transforms a custom-field value before it lands in the
+// customfieldRenderer transforms a custom-field value before it lands in the
 // response. nil means "pass through unchanged" — the raw default.
-type customFieldRenderer func(fieldID string, value any) any
+type customfieldRenderer func(fieldID string, value any) any
 
-// newCustomFieldRenderer returns the renderer for the requested FieldFormat.
+// newCustomfieldRenderer returns the renderer for the requested FieldFormat.
 // nil for raw mode means zero schema lookups during the read. The markdown
 // renderer converts ADF rich-text custom fields via FromADF; everything
 // else (unknown fields, non-textarea fields, non-doc values) passes through
-// rather than blocking the read.
-func (h *handlers) newCustomFieldRenderer(ctx context.Context, args ReadArgs) customFieldRenderer {
+// rather than blocking the read. A GetFields failure also degrades to
+// passthrough so the read still returns the raw ADF.
+func newCustomfieldRenderer(ctx context.Context, client JiraClient, args ReadArgs) customfieldRenderer {
 	if args.FieldFormat != "markdown" {
 		return nil
 	}
-	cache := newFieldSchemaCache(h.client)
+	cache, err := newFieldSchemaCache(ctx, client)
+	if err != nil {
+		return nil
+	}
 	return func(fieldID string, value any) any {
-		schema, err := cache.get(ctx, fieldID)
+		schema, err := cache.get(fieldID)
 		if err != nil || !isADFRichText(schema) {
 			return value
 		}
@@ -140,7 +144,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		if err != nil {
 			return formatReadResult("Fetched 0 issue(s)", nil, []string{fmt.Sprintf("%s: %v", args.Keys[0], err)})
 		}
-		render := h.newCustomFieldRenderer(ctx, args)
+		render := newCustomfieldRenderer(ctx, h.client, args)
 		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, render)}, nil)
 	}
 
@@ -166,7 +170,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		return textResult(fmt.Sprintf("Failed to fetch issues %v: %v", args.Keys, err), true)
 	}
 
-	render := h.newCustomFieldRenderer(ctx, args)
+	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
 		results = append(results, issueToMap(&sr.Issues[i], render))
@@ -193,7 +197,7 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 		return textResult(fmt.Sprintf("JQL search failed: %v\nHint: Check your JQL syntax. Use jira_schema resource=fields to see available field names.", err), true)
 	}
 
-	render := h.newCustomFieldRenderer(ctx, args)
+	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
 		results = append(results, issueToMap(&sr.Issues[i], render))
@@ -330,7 +334,7 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 		return textResult(fmt.Sprintf("Failed to get issues for sprint %d: %v", args.SprintID, err), true)
 	}
 
-	render := h.newCustomFieldRenderer(ctx, args)
+	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range issues {
 		results = append(results, issueToMap(&issues[i], render))
@@ -432,7 +436,7 @@ func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) 
 	}, true
 }
 
-func issueToMap(issue *jira.Issue, render customFieldRenderer) map[string]any {
+func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
 		"id":   issue.ID,

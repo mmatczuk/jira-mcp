@@ -284,7 +284,14 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 	}
 
 	cache := newCreateMetaCache()
-	schemaCache := newFieldSchemaCache(h.client)
+	var schemaCache *fieldSchemaCache
+	if anyCustomFieldsMarkdown(args.Items) {
+		var err error
+		schemaCache, err = newFieldSchemaCache(ctx, h.client)
+		if err != nil {
+			return textResult(fmt.Sprintf("Failed to load field catalogue: %v", err), true), nil, nil
+		}
+	}
 	var results []string
 
 	for i, item := range args.Items {
@@ -537,6 +544,18 @@ func buildCommentBody(body, rawFormat string) (out any, format string, err error
 	}, format, nil
 }
 
+// anyCustomFieldsMarkdown reports whether any item in the batch carries a
+// custom_fields_markdown payload, so handleWrite can skip the GetFields call
+// when none does.
+func anyCustomFieldsMarkdown(items []WriteItem) bool {
+	for _, item := range items {
+		if len(item.CustomFieldsMarkdown) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // applyCustomFieldsMarkdown converts each entry in item.CustomFieldsMarkdown
 // to ADF and merges it into payload["fields"]. It is generic across projects:
 // the per-field decision (Markdown/ADF vs reject) keys off the field's
@@ -552,7 +571,7 @@ func buildCommentBody(body, rawFormat string) (out any, format string, err error
 // Empty-string values are treated as an explicit clear: the field is set to
 // an empty ADF document so that Jira removes prior content. Validation
 // (collision, schema lookup, textarea check) still runs first.
-func applyCustomFieldsMarkdown(ctx context.Context, item WriteItem, payload map[string]any, schemaCache *fieldSchemaCache) error {
+func applyCustomFieldsMarkdown(item WriteItem, payload map[string]any, schemaCache *fieldSchemaCache) error {
 	if len(item.CustomFieldsMarkdown) == 0 {
 		return nil
 	}
@@ -561,7 +580,7 @@ func applyCustomFieldsMarkdown(ctx context.Context, item WriteItem, payload map[
 		if _, exists := fields[fieldID]; exists {
 			return fmt.Errorf("custom_fields_markdown[%s] collides with fields_json or a standard field — set the value in only one place", fieldID)
 		}
-		schema, err := schemaCache.get(ctx, fieldID)
+		schema, err := schemaCache.get(fieldID)
 		if err != nil {
 			return err
 		}
@@ -612,7 +631,7 @@ func (h *handlers) writeCreate(ctx context.Context, item WriteItem, dryRun bool,
 	if err != nil {
 		return "", err
 	}
-	if err := applyCustomFieldsMarkdown(ctx, item, payload, schemaCache); err != nil {
+	if err := applyCustomFieldsMarkdown(item, payload, schemaCache); err != nil {
 		return "", err
 	}
 
@@ -754,7 +773,7 @@ func (h *handlers) writeUpdate(ctx context.Context, item WriteItem, dryRun bool,
 	if err != nil {
 		return "", err
 	}
-	if err := applyCustomFieldsMarkdown(ctx, item, payload, schemaCache); err != nil {
+	if err := applyCustomFieldsMarkdown(item, payload, schemaCache); err != nil {
 		return "", err
 	}
 
