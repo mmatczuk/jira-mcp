@@ -39,6 +39,13 @@ type mockClient struct {
 	DeleteIssueLinkFn         func(ctx context.Context, linkID string) error
 	GetIssueLinkTypesFn       func(ctx context.Context) ([]jira.IssueLinkType, error)
 	GetRemoteLinksFn          func(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
+
+	GetAttachmentMetaFn    func(ctx context.Context, id string) (*jira.Attachment, error)
+	GetAttachmentBodyFn    func(ctx context.Context, id string, maxBytes int64) ([]byte, error)
+	PostAttachmentTextFn   func(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error)
+	DeleteAttachmentFn     func(ctx context.Context, id string) error
+	PostAttachmentTextCount int
+	GetAttachmentBodyCount  int
 }
 
 func (m *mockClient) GetMyself(ctx context.Context) (*jira.User, error) {
@@ -235,4 +242,34 @@ func (m *mockClient) GetRemoteLinks(ctx context.Context, issueKey string) ([]jir
 		panic(fmt.Sprintf("mockClient.GetRemoteLinks called but GetRemoteLinksFn not set (issueKey=%s)", issueKey))
 	}
 	return m.GetRemoteLinksFn(ctx, issueKey)
+}
+
+func (m *mockClient) GetAttachmentMeta(ctx context.Context, id string) (*jira.Attachment, error) {
+	if m.GetAttachmentMetaFn == nil {
+		panic(fmt.Sprintf("mockClient.GetAttachmentMeta called but GetAttachmentMetaFn not set (id=%s)", id))
+	}
+	return m.GetAttachmentMetaFn(ctx, id)
+}
+
+func (m *mockClient) GetAttachmentBody(ctx context.Context, id string, maxBytes int64) ([]byte, error) {
+	m.GetAttachmentBodyCount++
+	if m.GetAttachmentBodyFn == nil {
+		panic(fmt.Sprintf("mockClient.GetAttachmentBody called but GetAttachmentBodyFn not set (id=%s)", id))
+	}
+	return m.GetAttachmentBodyFn(ctx, id, maxBytes)
+}
+
+func (m *mockClient) PostAttachmentText(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error) {
+	m.PostAttachmentTextCount++
+	if m.PostAttachmentTextFn == nil {
+		panic(fmt.Sprintf("mockClient.PostAttachmentText called but PostAttachmentTextFn not set (issueKey=%s, filename=%s)", issueKey, filename))
+	}
+	return m.PostAttachmentTextFn(ctx, issueKey, filename, body)
+}
+
+func (m *mockClient) DeleteAttachment(ctx context.Context, id string) error {
+	if m.DeleteAttachmentFn == nil {
+		panic(fmt.Sprintf("mockClient.DeleteAttachment called but DeleteAttachmentFn not set (id=%s)", id))
+	}
+	return m.DeleteAttachmentFn(ctx, id)
 }

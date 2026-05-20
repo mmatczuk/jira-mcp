@@ -4,7 +4,9 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -14,6 +16,10 @@ import (
 
 	"github.com/andygrunwald/go-jira"
 )
+
+// ErrAttachmentTooLarge is returned by GetAttachmentBody when the body
+// exceeds the requested cap.
+var ErrAttachmentTooLarge = errors.New("attachment exceeds size cap")
 
 // Config holds JIRA connection settings.
 type Config struct {
@@ -653,6 +659,126 @@ func (c *Client) GetFieldOptions(ctx context.Context, fieldID string) ([]json.Ra
 		}
 	}
 	return values, nil
+}
+
+// GetAttachmentMeta returns the metadata for a single attachment.
+func (c *Client) GetAttachmentMeta(ctx context.Context, id string) (*jira.Attachment, error) {
+	type attachmentMeta struct {
+		Self      string       `json:"self,omitempty"`
+		ID        attachmentID `json:"id,omitempty"`
+		Filename  string       `json:"filename,omitempty"`
+		Author    *jira.User   `json:"author,omitempty"`
+		Created   string       `json:"created,omitempty"`
+		Size      int          `json:"size,omitempty"`
+		MimeType  string       `json:"mimeType,omitempty"`
+		Content   string       `json:"content,omitempty"`
+		Thumbnail string       `json:"thumbnail,omitempty"`
+	}
+	var raw attachmentMeta
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/attachment/%s", url.PathEscape(id))
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		raw = attachmentMeta{}
+		resp, err := c.j.Do(req, &raw)
+		return resp, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &jira.Attachment{
+		Self:      raw.Self,
+		ID:        string(raw.ID),
+		Filename:  raw.Filename,
+		Author:    raw.Author,
+		Created:   raw.Created,
+		Size:      raw.Size,
+		MimeType:  raw.MimeType,
+		Content:   raw.Content,
+		Thumbnail: raw.Thumbnail,
+	}, nil
+}
+
+// GetAttachmentBody downloads the attachment body, capped at maxBytes
+// (inclusive). Over-cap returns an error that wraps ErrAttachmentTooLarge.
+func (c *Client) GetAttachmentBody(ctx context.Context, id string, maxBytes int64) ([]byte, error) {
+	var body []byte
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		resp, dlErr := c.j.Issue.DownloadAttachmentWithContext(ctx, id)
+		if dlErr != nil {
+			return resp, dlErr
+		}
+		if resp == nil || resp.Body == nil {
+			return resp, fmt.Errorf("attachment %s: empty response", id)
+		}
+		// Read one more than the cap so we can distinguish at-cap from over-cap.
+		b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+		if readErr != nil {
+			return resp, readErr
+		}
+		if int64(len(b)) > maxBytes {
+			return resp, fmt.Errorf("attachment %s exceeds cap of %d bytes: %w", id, maxBytes, ErrAttachmentTooLarge)
+		}
+		body = b
+		return resp, nil
+	})
+	return body, err
+}
+
+// PostAttachmentText uploads body as filename to the issue.
+func (c *Client) PostAttachmentText(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error) {
+	var att *jira.Attachment
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		atts, resp, postErr := c.j.Issue.PostAttachmentWithContext(ctx, issueKey, strings.NewReader(body), filename)
+		if postErr != nil {
+			return resp, postErr
+		}
+		if atts == nil || len(*atts) == 0 {
+			return resp, fmt.Errorf("attachment upload to %s returned no metadata", issueKey)
+		}
+		first := (*atts)[0]
+		att = &first
+		return resp, nil
+	})
+	return att, err
+}
+
+// DeleteAttachment removes the attachment by id.
+func (c *Client) DeleteAttachment(ctx context.Context, id string) error {
+	return c.retry(ctx, func() (*jira.Response, error) {
+		resp, err := c.j.Issue.DeleteAttachmentWithContext(ctx, id)
+		return resp, err
+	})
+}
+
+// attachmentID decodes a Jira attachment id, which the API returns as either
+// a JSON string (issue-fields path) or number (rest/api/3/attachment/{id}).
+// The decoded value is the canonical string form.
+type attachmentID string
+
+func (a *attachmentID) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*a = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*a = attachmentID(s)
+		return nil
+	}
+	// Numeric literal — trim whitespace and accept as-is. Validate that it
+	// decodes as a JSON number so malformed input still errors.
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*a = attachmentID(n.String())
+	return nil
 }
 
 func (c *Client) shouldRetry(resp *jira.Response) (time.Duration, bool) {
