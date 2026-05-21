@@ -50,7 +50,7 @@ const serverInstructions = `Jira MCP Server — interact with JIRA Cloud via the
 - jira_write: Create, update, delete, transition issues; add/edit comments; move issues to sprints. Supports batch (array of items). Always has dry_run option.
 - jira_schema: Discover fields, transitions, field options — metadata needed to construct valid jira_write payloads.
 - jira_user_search: Find users by name or email. Returns account IDs needed for jira_write assignee field.
-- jira_attachments: List, upload, download, and delete issue attachments. Text mime types only (text/*, JSON, XML, YAML). 5 MB cap per body.
+- jira_attachments: Upload, download, and delete issue attachments. Text mime types only (text/*, JSON, XML, YAML). 5 MB cap per body. Attachment metadata is surfaced on jira_read issue responses.
 
 Workflow tips:
 1. To assign an issue, first use jira_user_search to find the user's accountId, then pass it to jira_write assignee.

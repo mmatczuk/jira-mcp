@@ -519,6 +519,65 @@ func TestIssueToMap_NoComments(t *testing.T) {
 	assert.False(t, has)
 }
 
+func TestIssueToMap_Attachments(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary: "x",
+			Attachments: []*jira.Attachment{
+				{
+					ID:       "10100",
+					Filename: "report.txt",
+					MimeType: "text/plain",
+					Size:     5,
+					Created:  "2025-03-12T10:23:45.000-0700",
+					Author:   &jira.User{DisplayName: "Alice", AccountID: "abc"},
+				},
+				nil,
+				{
+					ID:       "10101",
+					Filename: "data.json",
+					MimeType: "application/json",
+					Size:     9,
+				},
+			},
+		},
+	}
+
+	m := issueToMap(issue, nil)
+	fields := m["fields"].(map[string]any)
+	atts, ok := fields["attachments"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, atts, 2)
+
+	assert.Equal(t, "10100", atts[0]["id"])
+	assert.Equal(t, "report.txt", atts[0]["filename"])
+	assert.Equal(t, "text/plain", atts[0]["mime_type"])
+	assert.Equal(t, 5, atts[0]["size"])
+	assert.Equal(t, "2025-03-12T10:23:45.000-0700", atts[0]["created"])
+	assert.Equal(t, map[string]any{"displayName": "Alice", "accountId": "abc"}, atts[0]["author"])
+
+	assert.Equal(t, "10101", atts[1]["id"])
+	_, hasCreated := atts[1]["created"]
+	assert.False(t, hasCreated)
+	_, hasAuthor := atts[1]["author"]
+	assert.False(t, hasAuthor)
+}
+
+func TestIssueToMap_NoAttachments(t *testing.T) {
+	issue := &jira.Issue{
+		Key: "PROJ-1",
+		Fields: &jira.IssueFields{
+			Summary:     "x",
+			Attachments: []*jira.Attachment{},
+		},
+	}
+	m := issueToMap(issue, nil)
+	fields := m["fields"].(map[string]any)
+	_, has := fields["attachments"]
+	assert.False(t, has)
+}
+
 func TestIssueToMap_Parent(t *testing.T) {
 	issue := &jira.Issue{
 		Key: "PROJ-1",

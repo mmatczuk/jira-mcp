@@ -415,6 +415,22 @@ func commentToMap(c *jira.Comment) map[string]any {
 	return m
 }
 
+func attachmentToMap(a *jira.Attachment) map[string]any {
+	m := map[string]any{
+		"id":        a.ID,
+		"filename":  a.Filename,
+		"mime_type": a.MimeType,
+		"size":      a.Size,
+	}
+	if a.Created != "" {
+		m["created"] = a.Created
+	}
+	if a.Author != nil {
+		m["author"] = userToMap(a.Author)
+	}
+	return m
+}
+
 func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) {
 	if l == nil {
 		return nil, false
@@ -480,6 +496,17 @@ func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
 			}
 			if len(comments) > 0 {
 				fields["comment"] = comments
+			}
+		}
+		if len(issue.Fields.Attachments) > 0 {
+			atts := make([]map[string]any, 0, len(issue.Fields.Attachments))
+			for _, a := range issue.Fields.Attachments {
+				if a != nil {
+					atts = append(atts, attachmentToMap(a))
+				}
+			}
+			if len(atts) > 0 {
+				fields["attachments"] = atts
 			}
 		}
 		if len(issue.Fields.IssueLinks) > 0 {

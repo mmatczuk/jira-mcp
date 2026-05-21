@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,67 +24,6 @@ func callAttachments(t *testing.T, h *handlers, args AttachmentsArgs) (string, b
 	tc, ok := res.Content[0].(*mcp.TextContent)
 	require.True(t, ok, "expected TextContent, got %T", res.Content[0])
 	return tc.Text, res.IsError
-}
-
-func issueWithAttachments(atts []*jira.Attachment) *jira.Issue {
-	return &jira.Issue{
-		Fields: &jira.IssueFields{Attachments: atts},
-	}
-}
-
-func TestAttachments_List(t *testing.T) {
-	t.Run("two attachments", func(t *testing.T) {
-		mc := &mockClient{
-			GetIssueFn: func(_ context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {
-				assert.Equal(t, "PROJ-1", key)
-				require.NotNil(t, opts)
-				assert.Equal(t, "attachment", opts.Fields)
-				return issueWithAttachments([]*jira.Attachment{
-					{ID: "10100", Filename: "a.log", MimeType: "text/plain", Size: 5, Created: "2025-03-12T10:23:45.000-0700", Author: &jira.User{DisplayName: "Alice"}},
-					{ID: "10101", Filename: "b.json", MimeType: "application/json", Size: 9},
-				}), nil
-			},
-		}
-		h := &handlers{client: mc}
-		text, isErr := callAttachments(t, h, AttachmentsArgs{Action: "list", Key: "PROJ-1"})
-		require.False(t, isErr)
-
-		var got []attachmentMeta
-		require.NoError(t, json.Unmarshal([]byte(text), &got))
-		require.Len(t, got, 2)
-		assert.Equal(t, "10100", got[0].ID)
-		assert.Equal(t, "a.log", got[0].Filename)
-		assert.Equal(t, "text/plain", got[0].MimeType)
-		assert.Equal(t, 5, got[0].Size)
-		assert.Equal(t, "2025-03-12T10:23:45.000-0700", got[0].Created)
-		assert.Equal(t, "Alice", got[0].Author)
-		assert.Equal(t, "10101", got[1].ID)
-		assert.Empty(t, got[1].Author)
-	})
-
-	t.Run("no attachments returns empty array", func(t *testing.T) {
-		mc := &mockClient{
-			GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
-				return issueWithAttachments(nil), nil
-			},
-		}
-		h := &handlers{client: mc}
-		text, isErr := callAttachments(t, h, AttachmentsArgs{Action: "list", Key: "PROJ-1"})
-		require.False(t, isErr)
-		assert.Equal(t, "[]", text)
-	})
-
-	t.Run("404 propagated", func(t *testing.T) {
-		mc := &mockClient{
-			GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
-				return nil, errors.New("404 not found")
-			},
-		}
-		h := &handlers{client: mc}
-		text, isErr := callAttachments(t, h, AttachmentsArgs{Action: "list", Key: "MISSING-1"})
-		require.True(t, isErr)
-		assert.Contains(t, text, "404")
-	})
 }
 
 func assertNoUploadCalls(t *testing.T, mc *mockClient) {
@@ -109,12 +49,12 @@ func TestAttachments_Upload(t *testing.T) {
 		assert.Equal(t, "report.txt", gotFilename)
 		assert.Equal(t, "hello", gotBody)
 
-		var got attachmentMeta
+		var got map[string]any
 		require.NoError(t, json.Unmarshal([]byte(text), &got))
-		assert.Equal(t, "20001", got.ID)
-		assert.Equal(t, "report.txt", got.Filename)
-		assert.Equal(t, "text/plain", got.MimeType)
-		assert.Equal(t, 5, got.Size)
+		assert.Equal(t, "20001", got["id"])
+		assert.Equal(t, "report.txt", got["filename"])
+		assert.Equal(t, "text/plain", got["mime_type"])
+		assert.EqualValues(t, 5, got["size"])
 	})
 
 	t.Run("binary filename rejected before call", func(t *testing.T) {
@@ -278,8 +218,9 @@ func TestAttachments_Delete(t *testing.T) {
 }
 
 // statefulAttachmentStore is an in-memory backing store used only by the
-// full-loop test; it lets a single mockClient stitch upload/list/download/delete
-// together so a downstream call can see the effects of an upstream one.
+// full-loop test; it lets a single mockClient stitch upload/download/delete
+// together (and the jira_read attachment surfacing) so a downstream call
+// can see the effects of an upstream one.
 type statefulAttachmentStore struct {
 	atts   map[string]*jira.Attachment
 	bodies map[string][]byte
@@ -352,33 +293,54 @@ func TestAttachments_FullLoop(t *testing.T) {
 		Action: "upload", Key: "PROJ-1", Filename: "report.txt", Content: "hello",
 	})
 	require.False(t, isErr, "upload: %s", uploadText)
-	var uploaded attachmentMeta
+	var uploaded map[string]any
 	require.NoError(t, json.Unmarshal([]byte(uploadText), &uploaded))
-	require.NotEmpty(t, uploaded.ID)
+	uploadedID, _ := uploaded["id"].(string)
+	require.NotEmpty(t, uploadedID)
 
-	listText, isErr := callAttachments(t, h, AttachmentsArgs{Action: "list", Key: "PROJ-1"})
-	require.False(t, isErr)
-	var listed []attachmentMeta
-	require.NoError(t, json.Unmarshal([]byte(listText), &listed))
-	require.Len(t, listed, 1)
-	assert.Equal(t, uploaded.ID, listed[0].ID)
+	atts := readIssueAttachments(t, h, "PROJ-1")
+	require.Len(t, atts, 1)
+	assert.Equal(t, uploadedID, atts[0]["id"])
 
 	downloadText, isErr := callAttachments(t, h, AttachmentsArgs{
-		Action: "download", AttachmentID: uploaded.ID,
+		Action: "download", AttachmentID: uploadedID,
 	})
 	require.False(t, isErr)
 	assert.Equal(t, "hello", downloadText)
 
 	deleteText, isErr := callAttachments(t, h, AttachmentsArgs{
-		Action: "delete", AttachmentID: uploaded.ID,
+		Action: "delete", AttachmentID: uploadedID,
 	})
 	require.False(t, isErr)
-	assert.Contains(t, deleteText, uploaded.ID)
+	assert.Contains(t, deleteText, uploadedID)
 
-	listText, isErr = callAttachments(t, h, AttachmentsArgs{Action: "list", Key: "PROJ-1"})
-	require.False(t, isErr)
-	require.NoError(t, json.Unmarshal([]byte(listText), &listed))
-	assert.Empty(t, listed)
+	atts = readIssueAttachments(t, h, "PROJ-1")
+	assert.Empty(t, atts)
+}
+
+// readIssueAttachments runs jira_read for a single key and pulls the
+// attachments array off the projected issue, returning nil when absent.
+func readIssueAttachments(t *testing.T, h *handlers, key string) []map[string]any {
+	t.Helper()
+	text, isErr := callRead(t, h, ReadArgs{Keys: []string{key}})
+	require.False(t, isErr, "jira_read: %s", text)
+	idx := strings.Index(text, "[")
+	require.GreaterOrEqual(t, idx, 0, "no JSON payload in jira_read output: %s", text)
+	var issues []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text[idx:]), &issues))
+	require.Len(t, issues, 1)
+	fields, _ := issues[0]["fields"].(map[string]any)
+	raw, ok := fields["attachments"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, v := range raw {
+		if m, ok := v.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func TestAttachments_ActionValidation(t *testing.T) {
@@ -389,7 +351,6 @@ func TestAttachments_ActionValidation(t *testing.T) {
 	}{
 		{"missing action", AttachmentsArgs{}, "action"},
 		{"unknown action", AttachmentsArgs{Action: "ship"}, "action"},
-		{"list missing key", AttachmentsArgs{Action: "list"}, "key"},
 		{"upload missing key", AttachmentsArgs{Action: "upload", Filename: "f.txt", Content: "x"}, "key"},
 		{"upload missing filename", AttachmentsArgs{Action: "upload", Key: "P-1", Content: "x"}, "filename"},
 		{"upload missing content", AttachmentsArgs{Action: "upload", Key: "P-1", Filename: "f.txt"}, "content"},
