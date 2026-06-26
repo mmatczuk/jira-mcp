@@ -92,9 +92,12 @@ All actions support dry_run=true to preview without executing.
 Descriptions and comments expect Markdown by default and are converted to ADF via the v3 API. Do not round-trip a jira_read result straight into jira_write — old issues return legacy Jira wiki-markup, which is not Markdown. Wiki-markup tokens ({code}, {{inline}}, h1., etc.) are detected and rejected on the default path. To send wiki-markup deliberately, set description_format="wiki" or comment_format="wiki" — the write is then routed through the v2 API with the raw string.`,
 }
 
-// linkDirection encodes which side of a link the active issue plays.
-//   - linkOutward: active key sits on the From (outward, active) side.
-//   - linkInward:  active key sits on the To (inward, passive) side.
+// linkDirection encodes which Jira side of a link the active issue sits on.
+//   - linkOutward: active key sits on the outward side of the Jira link.
+//   - linkInward:  active key sits on the inward side of the Jira link.
+//
+// Per the create mapping in applyLinks (From=inward, To=outward), the From key
+// resolves to linkInward and the To key to linkOutward — see resolveUnlinkDirection.
 type linkDirection string
 
 const (
@@ -115,9 +118,9 @@ func (u UnlinkItem) triple() string {
 func resolveUnlinkDirection(activeKey string, u UnlinkItem) (dir linkDirection, otherKey string, ok bool) {
 	switch activeKey {
 	case u.From:
-		return linkOutward, u.To, true
+		return linkInward, u.To, true
 	case u.To:
-		return linkInward, u.From, true
+		return linkOutward, u.From, true
 	default:
 		return "", "", false
 	}
@@ -202,7 +205,14 @@ func (h *handlers) applyUnlinks(ctx context.Context, activeKey string, items []U
 }
 
 // applyLinks maps each LinkItem to a CreateIssueLinkInput as
-// From=outward, To=inward. Per-entry errors are collected; never short-circuits.
+// From=inward, To=outward. Per-entry errors are collected; never short-circuits.
+//
+// The From=inward/To=outward mapping is deliberate and looks inverted relative
+// to the Jira field names: empirically, the issue placed in OutwardIssue ends up
+// as the passive (blocked) side, so to honour the From-blocks-To contract From
+// must go to InwardIssue. This was verified on live Jira Cloud by creating a
+// Blocks link and reading the stored direction back. Do not "fix" it by swapping
+// From back to OutwardIssue without re-confirming against a live instance.
 func (h *handlers) applyLinks(ctx context.Context, items []LinkItem, dryRun bool) []string {
 	out := make([]string, 0, len(items))
 	for _, li := range items {
@@ -213,8 +223,8 @@ func (h *handlers) applyLinks(ctx context.Context, items []LinkItem, dryRun bool
 		}
 		in := jira.CreateIssueLinkInput{
 			Type:         li.Type,
-			OutwardIssue: li.From,
-			InwardIssue:  li.To,
+			OutwardIssue: li.To,
+			InwardIssue:  li.From,
 		}
 		if li.Comment != "" {
 			body, _, err := buildCommentBody(li.Comment, formatMarkdown)

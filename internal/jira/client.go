@@ -155,8 +155,11 @@ type IssueLinkComment struct {
 }
 
 // CreateIssueLinkInput is the request shape for POST /rest/api/3/issueLink.
-// InwardIssue is the passive side, OutwardIssue is the active side
-// ("OutwardIssue blocks InwardIssue" for type=Blocks).
+// Empirically (verified on live Jira Cloud by reading the stored direction back),
+// the resulting relationship reads "InwardIssue blocks OutwardIssue" for
+// type=Blocks — i.e. OutwardIssue is the passive (blocked) side. Callers that map
+// a from/to "from blocks to" contract must therefore send from as InwardIssue and
+// to as OutwardIssue (see jiramcp.applyLinks).
 type CreateIssueLinkInput struct {
 	Type         string
 	InwardIssue  string

@@ -686,6 +686,12 @@ func TestApplyLinks_AllSucceed(t *testing.T) {
 	assert.Contains(t, lines[1], "Linked PROJ-1 → PROJ-3 (Relates)")
 }
 
+// TestApplyLinks_FromToTranslation locks the from/to → inward/outward payload
+// mapping, independent of the echoed success string. For "PROJ-1 Blocks PROJ-2"
+// (from=blocker, to=blocked) the active From key must land in InwardIssue and the
+// passive To key in OutwardIssue, because Jira stores the relationship as
+// "InwardIssue blocks OutwardIssue" (verified by live read-back). Sending From as
+// OutwardIssue produces the inverse "PROJ-2 blocks PROJ-1" link.
 func TestApplyLinks_FromToTranslation(t *testing.T) {
 	var got jira.CreateIssueLinkInput
 	mc := &mockClient{
@@ -701,8 +707,8 @@ func TestApplyLinks_FromToTranslation(t *testing.T) {
 	}, false)
 
 	assert.Equal(t, "Blocks", got.Type)
-	assert.Equal(t, "PROJ-1", got.OutwardIssue, "from=outward")
-	assert.Equal(t, "PROJ-2", got.InwardIssue, "to=inward")
+	assert.Equal(t, "PROJ-1", got.InwardIssue, "from (blocker) → inward")
+	assert.Equal(t, "PROJ-2", got.OutwardIssue, "to (blocked) → outward")
 }
 
 func TestApplyLinks_PartialFailure(t *testing.T) {
@@ -1024,7 +1030,10 @@ func TestApplyUnlinks_ByTriple(t *testing.T) {
 	mc := &mockClient{
 		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
 			getCalled = true
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+			// From=PROJ-1 is the active issue; per applyLinks (From=inward) it
+			// resolves to linkInward, so the other key (PROJ-2) sits on the
+			// outward side: activeIsOutward=false.
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID
@@ -1041,15 +1050,17 @@ func TestApplyUnlinks_ByTriple(t *testing.T) {
 	assert.Contains(t, lines[0], "Unlinked")
 }
 
-func TestApplyUnlinks_ByTriple_InwardDirection(t *testing.T) {
+func TestApplyUnlinks_ByTriple_ActiveIsToSide(t *testing.T) {
 	deleted := ""
 	mc := &mockClient{
 		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
 			assert.Equal(t, "PROJ-2", key, "GetIssue must be called on the active key, not the From key")
-			// PROJ-1 (outward) Blocks PROJ-2 (inward, active). The fixture only
-			// matches when resolveLinkID is called with linkInward direction;
-			// any other direction would yield zero matches and an error.
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-1", false}), nil
+			// To=PROJ-2 is the active issue; per applyLinks (To=outward) it
+			// resolves to linkOutward, so the other key (PROJ-1) sits on the
+			// inward side: activeIsOutward=true. The fixture only matches when
+			// resolveLinkID is called with linkOutward direction; any other
+			// direction would yield zero matches and an error.
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-1", true}), nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID
@@ -1136,7 +1147,9 @@ func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
 			return nil
 		},
 		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
-			return makeIssueWithLinks(linkFixture{"55", "Blocks", "PROJ-9", true}), nil
+			// Unlink active key is From=PROJ-3 → linkInward, so the other key
+			// (PROJ-9) sits on the outward side: activeIsOutward=false.
+			return makeIssueWithLinks(linkFixture{"55", "Blocks", "PROJ-9", false}), nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			calls = append(calls, call{kind: "delete", arg: linkID})
@@ -1144,6 +1157,8 @@ func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
 		},
 		CreateIssueLinkFn: func(_ context.Context, in jira.CreateIssueLinkInput) error {
 			require.NotNil(t, in.Comment, "expected ADF comment on link creation")
+			// Record the literal payload as outward→inward. For From=PROJ-1,
+			// To=PROJ-2 the fixed mapping sends To→outward, From→inward.
 			calls = append(calls, call{kind: "create", arg: in.OutwardIssue + "→" + in.InwardIssue})
 			return nil
 		},
@@ -1176,7 +1191,7 @@ func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
 	// the unlink survives.
 	require.Len(t, calls, 3)
 	assert.Equal(t, call{"update", "PROJ-1"}, calls[0])
-	assert.Equal(t, call{"create", "PROJ-1→PROJ-2"}, calls[1])
+	assert.Equal(t, call{"create", "PROJ-2→PROJ-1"}, calls[1])
 	assert.Equal(t, call{"delete", "55"}, calls[2])
 	assert.Contains(t, text, "No field updates on PROJ-3.")
 }
@@ -1211,7 +1226,9 @@ func TestHandleWrite_Update_WithUnlinksByTriple(t *testing.T) {
 	mc := &mockClient{
 		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error { return nil },
 		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil
+			// Active key From=PROJ-1 → linkInward, so PROJ-2 is on the outward
+			// side: activeIsOutward=false.
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID
