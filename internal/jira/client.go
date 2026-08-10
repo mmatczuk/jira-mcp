@@ -21,6 +21,25 @@ import (
 // exceeds the requested cap.
 var ErrAttachmentTooLarge = errors.New("attachment exceeds size cap")
 
+// APIError wraps a Jira REST call that failed with a non-2xx status, carrying
+// that status so callers can branch on it without matching error text. Errors
+// raised client-side on an otherwise successful call (a decode failure, an
+// over-cap attachment body) are deliberately left unwrapped, so the presence of
+// an APIError means the status itself was the failure.
+type APIError struct {
+	StatusCode int
+	Err        error
+}
+
+func (e *APIError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("jira api error: status %d", e.StatusCode)
+	}
+	return e.Err.Error()
+}
+
+func (e *APIError) Unwrap() error { return e.Err }
+
 // Config holds JIRA connection settings.
 type Config struct {
 	URL        string
@@ -232,6 +251,101 @@ func (c *Client) GetRemoteLinks(ctx context.Context, issueKey string) ([]RemoteL
 		return resp, err
 	})
 	return links, err
+}
+
+// CreateOrUpdateRemoteLinkInput is the request shape for
+// POST /rest/api/3/issue/{issueIdOrKey}/remotelink. Jira upserts on GlobalID.
+type CreateOrUpdateRemoteLinkInput struct {
+	URL         string
+	Title       string
+	GlobalID    string
+	Application *RemoteLinkApp
+	Resolved    *bool
+}
+
+// CreateOrUpdateRemoteLinkResult captures what Jira returns from the upsert.
+type CreateOrUpdateRemoteLinkResult struct {
+	ID      int    // Jira's internal link id.
+	Self    string // Canonical URL of the created/updated link.
+	Created bool   // True when Jira returned 201 (new link); false on 200 (existing link updated).
+}
+
+// CreateOrUpdateRemoteLink creates or updates a remote link via
+// POST /rest/api/3/issue/{issueIdOrKey}/remotelink. Jira dedups on globalId:
+// a request whose globalId matches an existing link updates it (status 200)
+// instead of creating a duplicate (status 201) — CreateOrUpdateRemoteLinkResult.Created
+// reflects which of the two occurred.
+func (c *Client) CreateOrUpdateRemoteLink(ctx context.Context, issueKey string, in CreateOrUpdateRemoteLinkInput) (*CreateOrUpdateRemoteLinkResult, error) {
+	object := RemoteLinkObject{
+		URL:   in.URL,
+		Title: in.Title,
+	}
+	if in.Resolved != nil {
+		object.Status = &RemoteLinkStatus{Resolved: *in.Resolved}
+	}
+	body := struct {
+		GlobalID    string           `json:"globalId,omitempty"`
+		Application *RemoteLinkApp   `json:"application,omitempty"`
+		Object      RemoteLinkObject `json:"object"`
+	}{
+		GlobalID:    in.GlobalID,
+		Application: in.Application,
+		Object:      object,
+	}
+
+	var result CreateOrUpdateRemoteLinkResult
+	err := c.retry(ctx, func() (*jira.Response, error) {
+		path := fmt.Sprintf("rest/api/3/issue/%s/remotelink", url.PathEscape(issueKey))
+		req, reqErr := c.j.NewRequestWithContext(ctx, "POST", path, body)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		var respBody struct {
+			ID   int    `json:"id"`
+			Self string `json:"self"`
+		}
+		resp, doErr := c.j.Do(req, &respBody)
+		if resp != nil {
+			result.Created = resp.StatusCode == http.StatusCreated
+		}
+		result.ID = respBody.ID
+		result.Self = respBody.Self
+		return resp, doErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DeleteRemoteLink removes a remote link via
+// DELETE /rest/api/3/issue/{issueIdOrKey}/remotelink/{linkId} (path form, used
+// when linkID is set) or DELETE .../remotelink?globalId=... (query form, used
+// when only globalID is set); globalID is URL-encoded into the query string.
+// Jira returns 204 on success. Exactly one of linkID / globalID should be
+// non-empty — enforcing that as a user-facing validation error is the
+// handler's job, but this method still rejects the case where both are empty
+// to avoid silently hitting the bare collection endpoint.
+func (c *Client) DeleteRemoteLink(ctx context.Context, issueKey, linkID, globalID string) error {
+	if linkID == "" && globalID == "" {
+		return errors.New("delete remote link: at least one of linkID or globalID must be set")
+	}
+
+	var path string
+	if linkID != "" {
+		path = fmt.Sprintf("rest/api/3/issue/%s/remotelink/%s", url.PathEscape(issueKey), url.PathEscape(linkID))
+	} else {
+		path = fmt.Sprintf("rest/api/3/issue/%s/remotelink?globalId=%s", url.PathEscape(issueKey), url.QueryEscape(globalID))
+	}
+
+	return c.retry(ctx, func() (*jira.Response, error) {
+		req, err := c.j.NewRequestWithContext(ctx, "DELETE", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.j.Do(req, nil)
+		return resp, err
+	})
 }
 
 // GetIssueLinkTypes returns the issue link types configured on the Jira
@@ -854,6 +968,12 @@ func (c *Client) retry(ctx context.Context, fn func() (*jira.Response, error)) e
 		retryAfter, shouldRetry := c.shouldRetry(resp)
 		if !shouldRetry || attempt == c.cfg.MaxRetries {
 			enriched := enrichError(resp, err)
+			// Only a non-2xx status becomes an APIError. A 2xx response paired
+			// with an error means the call succeeded and the failure came from
+			// our own handling of the body, where the status says nothing.
+			if resp != nil && (resp.StatusCode < 200 || resp.StatusCode > 299) {
+				enriched = &APIError{StatusCode: resp.StatusCode, Err: enriched}
+			}
 			closeResp(resp)
 			return enriched
 		}

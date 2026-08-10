@@ -37,6 +37,8 @@ type JiraClient interface {
 	DeleteIssueLink(ctx context.Context, linkID string) error
 	GetIssueLinkTypes(ctx context.Context) ([]jira.IssueLinkType, error)
 	GetRemoteLinks(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
+	CreateOrUpdateRemoteLink(ctx context.Context, issueKey string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error)
+	DeleteRemoteLink(ctx context.Context, issueKey, linkID, globalID string) error
 
 	GetAttachmentMeta(ctx context.Context, id string) (*jira.Attachment, error)
 	GetAttachmentBody(ctx context.Context, id string, maxBytes int64) ([]byte, error)

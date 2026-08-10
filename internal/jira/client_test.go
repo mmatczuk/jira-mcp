@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -122,6 +123,17 @@ func TestBackoff_Exponential(t *testing.T) {
 	assert.Equal(t, 400*time.Millisecond, c.backoff(2, 0))
 }
 
+// --- APIError ---
+
+// TestAPIError_ErrorWithoutWrapped covers a hand-constructed APIError carrying
+// only a status: retry always supplies Err, but the type is exported, so Error()
+// must describe the status rather than nil-dereference.
+func TestAPIError_ErrorWithoutWrapped(t *testing.T) {
+	err := &APIError{StatusCode: http.StatusNotFound}
+	assert.Equal(t, "jira api error: status 404", err.Error())
+	assert.NoError(t, err.Unwrap())
+}
+
 // --- enrichError ---
 
 func TestEnrichError_NilResponse(t *testing.T) {
@@ -232,6 +244,48 @@ func TestRetry_EnrichesErrorWithFieldDetails(t *testing.T) {
 		"fields": map[string]any{"summary": "test"},
 	})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "something went wrong")
+	assert.Contains(t, err.Error(), "description: INVALID_INPUT")
+}
+
+func TestRetry_WrapsErrorAsAPIError_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errorMessages":["Issue does not exist"]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, _, err := c.CreateIssueV3(context.Background(), map[string]any{})
+	require.Error(t, err)
+
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+	assert.Contains(t, err.Error(), "Issue does not exist")
+}
+
+func TestRetry_WrapsErrorAsAPIError_400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errorMessages":["something went wrong"],"errors":{"description":"INVALID_INPUT"}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, _, err := c.CreateIssueV3(context.Background(), map[string]any{
+		"fields": map[string]any{"summary": "test"},
+	})
+	require.Error(t, err)
+
+	// Proves StatusCode carries the actual response status rather than a
+	// hardcoded constant: same wrapping path as the 404 case above, but the
+	// field is expected to differ.
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	assert.Contains(t, err.Error(), "something went wrong")
 	assert.Contains(t, err.Error(), "description: INVALID_INPUT")
 }
@@ -513,6 +567,228 @@ func TestGetRemoteLinks_Error_404(t *testing.T) {
 	require.Error(t, err)
 }
 
+// --- CreateOrUpdateRemoteLink ---
+
+func TestCreateOrUpdateRemoteLink_FullPayload(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 10000, "self": "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10000"}`))
+	}))
+	defer srv.Close()
+
+	resolved := true
+	c := newTestClient(t, srv.URL)
+	got, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+		URL:      "https://example.com/doc/1",
+		Title:    "State map",
+		GlobalID: "system=example.com/document=1",
+		Application: &RemoteLinkApp{
+			Type: "com.example.tool",
+			Name: "Example Tool",
+		},
+		Resolved: &resolved,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issue/PROJ-1/remotelink", gotPath)
+	assert.Equal(t, "POST", gotMethod)
+
+	assert.Equal(t, "system=example.com/document=1", gotBody["globalId"])
+	application, ok := gotBody["application"].(map[string]any)
+	require.True(t, ok, "application should be an object")
+	assert.Equal(t, "com.example.tool", application["type"])
+	assert.Equal(t, "Example Tool", application["name"])
+
+	object, ok := gotBody["object"].(map[string]any)
+	require.True(t, ok, "object should be an object")
+	assert.Equal(t, "https://example.com/doc/1", object["url"])
+	assert.Equal(t, "State map", object["title"])
+	status, ok := object["status"].(map[string]any)
+	require.True(t, ok, "status should be an object when Resolved is set")
+	assert.Equal(t, true, status["resolved"])
+
+	require.NotNil(t, got)
+	assert.Equal(t, 10000, got.ID)
+	assert.Equal(t, "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10000", got.Self)
+	assert.True(t, got.Created, "201 response should report Created=true")
+}
+
+func TestCreateOrUpdateRemoteLink_MinimalPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 10001, "self": "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10001"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+		URL:   "https://example.com/doc/2",
+		Title: "Minimal link",
+	})
+	require.NoError(t, err)
+
+	_, hasGlobalID := gotBody["globalId"]
+	assert.False(t, hasGlobalID, "globalId key must be absent when GlobalID is empty")
+	_, hasApplication := gotBody["application"]
+	assert.False(t, hasApplication, "application key must be absent when Application is nil")
+
+	object, ok := gotBody["object"].(map[string]any)
+	require.True(t, ok, "object should be an object")
+	assert.Equal(t, "https://example.com/doc/2", object["url"])
+	assert.Equal(t, "Minimal link", object["title"])
+	_, hasStatus := object["status"]
+	assert.False(t, hasStatus, "status key must be absent when Resolved is nil")
+	_, hasSummary := object["summary"]
+	assert.False(t, hasSummary, "summary key must be absent when unset")
+}
+
+func TestCreateOrUpdateRemoteLink_ResolvedFalse(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 10002, "self": "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10002"}`))
+	}))
+	defer srv.Close()
+
+	resolved := false
+	c := newTestClient(t, srv.URL)
+	_, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+		URL:      "https://example.com/doc/3",
+		Title:    "Open item",
+		Resolved: &resolved,
+	})
+	require.NoError(t, err)
+
+	object, ok := gotBody["object"].(map[string]any)
+	require.True(t, ok, "object should be an object")
+	status, ok := object["status"].(map[string]any)
+	require.True(t, ok, "status should be an object when Resolved is set, even to false")
+	assert.Equal(t, false, status["resolved"], "explicit false must reach Jira, not be omitted")
+}
+
+func TestCreateOrUpdateRemoteLink_Updated200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id": 10000, "self": "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10000"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+		URL:      "https://example.com/doc/1",
+		Title:    "State map",
+		GlobalID: "system=example.com/document=1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.Created, "200 response should report Created=false")
+	assert.Equal(t, 10000, got.ID)
+}
+
+func TestCreateOrUpdateRemoteLink_Error_400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errorMessages":["url is not a valid URL"]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+		URL:   "not-a-url",
+		Title: "Bad link",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "url is not a valid URL")
+}
+
+// --- DeleteRemoteLink ---
+
+func TestDeleteRemoteLink_ByLinkID(t *testing.T) {
+	var gotPath, gotMethod, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteRemoteLink(context.Background(), "PROJ-1", "10042", "")
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issue/PROJ-1/remotelink/10042", gotPath)
+	assert.Equal(t, "DELETE", gotMethod)
+	assert.Empty(t, gotQuery)
+}
+
+func TestDeleteRemoteLink_ByGlobalID(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotGlobalID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotGlobalID = r.URL.Query().Get("globalId")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	globalID := "system=example.com/document=1&x=y"
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteRemoteLink(context.Background(), "PROJ-1", "", globalID)
+	require.NoError(t, err)
+	assert.Equal(t, "/rest/api/3/issue/PROJ-1/remotelink", gotPath)
+	assert.Equal(t, "DELETE", gotMethod)
+	assert.Equal(t, globalID, gotGlobalID, "the '=' and '/' in globalID must round-trip through URL encoding")
+}
+
+func TestDeleteRemoteLink_Error_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errorMessages":["No remote link with id 9999 exists"]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteRemoteLink(context.Background(), "PROJ-1", "9999", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "No remote link with id 9999 exists")
+	// Pinned: the jiramcp handler's 404 detection now branches on the typed
+	// *APIError.StatusCode rather than matching error text, so a go-jira
+	// upgrade that rewords CheckResponse can no longer silently degrade the
+	// friendly hint.
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+}
+
+func TestDeleteRemoteLink_NeitherIDSet(t *testing.T) {
+	requested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requested = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	err := c.DeleteRemoteLink(context.Background(), "PROJ-1", "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one of linkID or globalID must be set")
+	assert.False(t, requested, "no HTTP request should be made when neither id is set")
+}
+
 // --- CreateIssueLink ---
 
 func TestCreateIssueLink_NoComment(t *testing.T) {
@@ -782,6 +1058,11 @@ func TestGetAttachmentBody(t *testing.T) {
 		_, err := c.GetAttachmentBody(context.Background(), "10100", 5)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrAttachmentTooLarge)
+		// The HTTP call itself succeeded (200) — the cap is our own rule, so the
+		// status carries no failure information and must not be wrapped as an
+		// APIError. Callers branch on APIError to mean "Jira rejected this".
+		var apiErr *APIError
+		assert.NotErrorAs(t, err, &apiErr)
 	})
 
 	t.Run("404", func(t *testing.T) {

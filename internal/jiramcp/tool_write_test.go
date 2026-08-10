@@ -3,6 +3,7 @@ package jiramcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -190,6 +191,57 @@ func TestWriteToolDescription_MentionsLinks(t *testing.T) {
 	for _, want := range []string{"links", "unlinks", "parent_key"} {
 		assert.Contains(t, writeTool.Description, want)
 	}
+}
+
+// TestWriteTool_RemoteLinkApplicationDescriptionMatchesSchema guards against
+// the jsonschema description promising a field the schema's
+// additionalProperties: false actually rejects — icon fields were never
+// exposed on RemoteLinkAppItem, so the description must not name them.
+func TestWriteTool_RemoteLinkApplicationDescriptionMatchesSchema(t *testing.T) {
+	schema, ok := writeTool.InputSchema.(*jsonschema.Schema)
+	require.True(t, ok, "writeTool.InputSchema must be a *jsonschema.Schema")
+
+	itemSchema := schema.Properties["items"].Items
+	require.NotNil(t, itemSchema)
+
+	remoteLink := itemSchema.Properties["remote_link"]
+	require.NotNil(t, remoteLink, "missing remote_link property")
+	appProp := remoteLink.Properties["application"]
+	require.NotNil(t, appProp, "missing remote_link.application property")
+
+	assert.NotContains(t, appProp.Description, "icon", "application sub-object has no icon field")
+	assert.Contains(t, appProp.Description, "type")
+	assert.Contains(t, appProp.Description, "name")
+
+	// Tie the description to the actual schema: if a property were renamed
+	// or added (e.g. RemoteLinkAppItem.Name renamed away from json "name"),
+	// this must fail even though the string assertions above still pass.
+	gotProps := make([]string, 0, len(appProp.Properties))
+	for name := range appProp.Properties {
+		gotProps = append(gotProps, name)
+	}
+	assert.ElementsMatch(t, []string{"type", "name"}, gotProps, "application sub-schema property set must match the description")
+	assert.NotNil(t, appProp.AdditionalProperties, "additionalProperties must be set so an unexpected key (e.g. icon) is a hard schema rejection")
+}
+
+// TestWriteTool_KeyDescriptionListsAllActionsRequiringIt guards the key
+// field description against drifting from the actions that hard-error
+// without it (move_to_sprint, remote_link, delete_remote_link all require
+// key but were missing from the list).
+func TestWriteTool_KeyDescriptionListsAllActionsRequiringIt(t *testing.T) {
+	schema, ok := writeTool.InputSchema.(*jsonschema.Schema)
+	require.True(t, ok, "writeTool.InputSchema must be a *jsonschema.Schema")
+
+	itemSchema := schema.Properties["items"].Items
+	require.NotNil(t, itemSchema)
+
+	keyProp := itemSchema.Properties["key"]
+	require.NotNil(t, keyProp, "missing key property")
+	// A single Contains on the whole list, not a per-action loop: several
+	// action names are substrings of others (delete/delete_remote_link,
+	// comment/edit_comment, remote_link/delete_remote_link), so a loop would
+	// pass even if a compound action were silently dropped from the list.
+	assert.Contains(t, keyProp.Description, "update/delete/transition/comment/edit_comment/move_to_sprint/remote_link/delete_remote_link")
 }
 
 // --- custom_fields_markdown ---
@@ -1866,6 +1918,423 @@ func TestWriteMoveToSprint_ClientError(t *testing.T) {
 	assert.False(t, isErr) // errors are per-sprint in the result text
 	assert.Contains(t, text, "ERROR")
 	assert.Contains(t, text, "sprint not found")
+}
+
+// --- remote_link ---
+
+func TestWriteRemoteLink_Success_Created(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, key string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			assert.Equal(t, "PROJ-1", key)
+			assert.Equal(t, "https://example.com/doc/1", in.URL)
+			assert.Equal(t, "Design doc", in.Title)
+			assert.Equal(t, "system=example.com/document=1", in.GlobalID)
+			require.NotNil(t, in.Application)
+			assert.Equal(t, "com.example.tool", in.Application.Type)
+			assert.Equal(t, "Example Tool", in.Application.Name)
+			require.NotNil(t, in.Resolved)
+			assert.False(t, *in.Resolved)
+			return &jira.CreateOrUpdateRemoteLinkResult{ID: 10000, Self: "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10000", Created: true}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	resolved := false
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items: []WriteItem{{
+			Key: "PROJ-1",
+			RemoteLink: &RemoteLinkItem{
+				URL:         "https://example.com/doc/1",
+				Title:       "Design doc",
+				GlobalID:    "system=example.com/document=1",
+				Application: &RemoteLinkAppItem{Type: "com.example.tool", Name: "Example Tool"},
+				Resolved:    &resolved,
+			},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Created remote link 10000 on PROJ-1.")
+}
+
+func TestWriteRemoteLink_Success_Updated(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, _ jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			return &jira.CreateOrUpdateRemoteLinkResult{ID: 10000, Created: false}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items: []WriteItem{{
+			Key: "PROJ-1",
+			RemoteLink: &RemoteLinkItem{
+				URL:      "https://example.com/doc/1",
+				Title:    "Design doc",
+				GlobalID: "system=example.com/document=1",
+			},
+		}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Updated remote link 10000 on PROJ-1.")
+}
+
+func TestWriteRemoteLink_MissingURL(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{Title: "Design doc"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "remote_link requires remote_link.url and remote_link.title")
+}
+
+func TestWriteRemoteLink_MissingTitle(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{URL: "https://example.com/doc/1"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "remote_link requires remote_link.url and remote_link.title")
+}
+
+func TestWriteRemoteLink_MalformedURL(t *testing.T) {
+	tests := []string{"not-a-url", "example.com/doc/1", "/relative/path"}
+	for _, u := range tests {
+		t.Run(u, func(t *testing.T) {
+			h := newWriteHandlers(&mockClient{})
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: "remote_link",
+				Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{URL: u, Title: "Design doc"}}},
+			})
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, "is not a valid absolute URL")
+		})
+	}
+}
+
+func TestWriteRemoteLink_MissingPayload(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1"}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "remote_link requires a remote_link payload")
+}
+
+func TestWriteRemoteLink_MissingKey(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{RemoteLink: &RemoteLinkItem{URL: "https://example.com/doc/1", Title: "Design doc"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "remote_link requires key")
+}
+
+func TestWriteRemoteLink_CaveatWhenNoGlobalID(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, _ jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{URL: "https://example.com/doc/1", Title: "Design doc"}}},
+	})
+	assert.Contains(t, text, "no global_id set", "caveat must be present when global_id is absent")
+}
+
+func TestWriteRemoteLink_NoCaveatWhenGlobalIDSet(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, _ jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items: []WriteItem{{
+			Key: "PROJ-1",
+			RemoteLink: &RemoteLinkItem{
+				URL:      "https://example.com/doc/1",
+				Title:    "Design doc",
+				GlobalID: "system=example.com/document=1",
+			},
+		}},
+	})
+	assert.NotContains(t, text, "no global_id set", "caveat must be absent when global_id is set")
+}
+
+func TestWriteRemoteLink_DryRun_NoClientCall(t *testing.T) {
+	tests := []struct {
+		name     string
+		globalID string
+		want     string
+	}{
+		{name: "no global_id wants would-create wording", want: "Would create remote link on PROJ-1"},
+		{name: "global_id set wants would-upsert wording", globalID: "system=example.com/document=1", want: "Would upsert remote link on PROJ-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWriteHandlers(&mockClient{}) // no *Fn set — a client call panics
+			text, isErr := callWrite(t, h, WriteArgs{
+				Action: "remote_link",
+				DryRun: true,
+				Items: []WriteItem{{
+					Key: "PROJ-1",
+					RemoteLink: &RemoteLinkItem{
+						URL:      "https://example.com/doc/1",
+						Title:    "Design doc",
+						GlobalID: tc.globalID,
+					},
+				}},
+			})
+			assert.False(t, isErr)
+			assert.Contains(t, text, "DRY RUN")
+			assert.Contains(t, text, tc.want)
+		})
+	}
+}
+
+func TestWriteRemoteLink_ClientError(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(context.Context, string, jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			return nil, fmt.Errorf("service unavailable")
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{URL: "https://example.com/doc/1", Title: "Design doc"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "service unavailable")
+}
+
+// --- delete_remote_link ---
+
+func TestWriteDeleteRemoteLink_ByLinkID(t *testing.T) {
+	mc := &mockClient{
+		DeleteRemoteLinkFn: func(_ context.Context, key, linkID, globalID string) error {
+			assert.Equal(t, "PROJ-1", key)
+			assert.Equal(t, "10042", linkID)
+			assert.Empty(t, globalID)
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{LinkID: "10042"}}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Deleted remote link on PROJ-1 by link_id=10042.")
+}
+
+func TestWriteDeleteRemoteLink_ByGlobalID(t *testing.T) {
+	mc := &mockClient{
+		DeleteRemoteLinkFn: func(_ context.Context, key, linkID, globalID string) error {
+			assert.Equal(t, "PROJ-1", key)
+			assert.Empty(t, linkID)
+			assert.Equal(t, "system=example.com/document=1", globalID)
+			return nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{GlobalID: "system=example.com/document=1"}}},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "Deleted remote link on PROJ-1 by global_id=system=example.com/document=1.")
+}
+
+func TestWriteDeleteRemoteLink_BothSet(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{LinkID: "1", GlobalID: "g"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "pass exactly one of remote_link.link_id or remote_link.global_id, not both")
+}
+
+func TestWriteDeleteRemoteLink_NeitherSet(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "requires exactly one of remote_link.link_id or remote_link.global_id")
+}
+
+func TestWriteDeleteRemoteLink_MissingPayload(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1"}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "delete_remote_link requires a remote_link payload")
+}
+
+func TestWriteDeleteRemoteLink_MissingKey(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{RemoteLink: &RemoteLinkItem{LinkID: "10042"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "delete_remote_link requires key")
+}
+
+// TestWriteDeleteRemoteLink_NotFound pins the 404 handling: DELETE
+// …/remotelink/{id} also 404s when the issue itself doesn't exist, so the
+// hint must not assume the issue is reachable, and the wrapped client error
+// (via %w) must still be walkable in the final message. The handler detects
+// this via errors.As against *jira.APIError.StatusCode, not by matching error
+// text, so the mock returns the typed error the real client now produces.
+func TestWriteDeleteRemoteLink_NotFound(t *testing.T) {
+	mc := &mockClient{
+		DeleteRemoteLinkFn: func(context.Context, string, string, string) error {
+			return &jira.APIError{
+				StatusCode: 404,
+				Err:        fmt.Errorf("request failed. Please analyze the request body for more details. Status code: 404: No remote link with id 9999 exists"),
+			}
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{LinkID: "9999"}}},
+	})
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "remote link or issue not found on PROJ-1 (link_id=9999): request failed")
+	assert.Contains(t, text, "jira_read resource=remote_links issue_key=PROJ-1")
+	assert.Contains(t, text, "No remote link with id 9999 exists", "original Jira error detail must survive via %w")
+}
+
+// TestWriteDeleteRemoteLink_NotFound_StatusNotInErrorText is what makes the
+// typed detection load-bearing: the wrapped text deliberately omits go-jira's
+// "Status code: 404" wording, so this fails under the previous
+// strings.Contains implementation and passes only via errors.As on StatusCode.
+// It stands in for a go-jira upgrade that rewords CheckResponse.
+func TestWriteDeleteRemoteLink_NotFound_StatusNotInErrorText(t *testing.T) {
+	mc := &mockClient{
+		DeleteRemoteLinkFn: func(context.Context, string, string, string) error {
+			return &jira.APIError{
+				StatusCode: 404,
+				Err:        errors.New("the remote link does not exist"),
+			}
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, _ := callWrite(t, h, WriteArgs{
+		Action: "delete_remote_link",
+		Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{GlobalID: "system=example.com/document=1"}}},
+	})
+	assert.Contains(t, text, "remote link or issue not found on PROJ-1 (global_id=system=example.com/document=1)")
+	assert.Contains(t, text, "jira_read resource=remote_links issue_key=PROJ-1")
+}
+
+// TestWriteDeleteRemoteLink_NonNotFoundError is the negative case for the
+// StatusCode branch above: a client error that is either a typed *APIError
+// with a non-404 status, or not an *APIError at all, must fall through to
+// the generic delete-failure message rather than the "not found" hint.
+func TestWriteDeleteRemoteLink_NonNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "APIError with non-404 status", err: &jira.APIError{StatusCode: 500, Err: fmt.Errorf("request failed. Status code: 500: internal server error")}},
+		{name: "untyped error", err: errors.New("connection reset by peer")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{
+				DeleteRemoteLinkFn: func(context.Context, string, string, string) error {
+					return tc.err
+				},
+			}
+			h := newWriteHandlers(mc)
+			text, _ := callWrite(t, h, WriteArgs{
+				Action: "delete_remote_link",
+				Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{LinkID: "9999"}}},
+			})
+			assert.Contains(t, text, "ERROR")
+			assert.Contains(t, text, "failed to delete remote link on PROJ-1")
+			assert.NotContains(t, text, "not found")
+			assert.NotContains(t, text, "Hint: use jira_read resource=remote_links")
+		})
+	}
+}
+
+func TestWriteDeleteRemoteLink_DryRun_NoClientCall(t *testing.T) {
+	tests := []struct {
+		name string
+		rl   *RemoteLinkItem
+		want string
+	}{
+		{name: "by link_id", rl: &RemoteLinkItem{LinkID: "10042"}, want: "Would delete remote link on PROJ-1 by link_id=10042"},
+		{name: "by global_id", rl: &RemoteLinkItem{GlobalID: "system=example.com/document=1"}, want: "Would delete remote link on PROJ-1 by global_id=system=example.com/document=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWriteHandlers(&mockClient{}) // no *Fn set — a client call panics
+			text, isErr := callWrite(t, h, WriteArgs{
+				Action: "delete_remote_link",
+				DryRun: true,
+				Items:  []WriteItem{{Key: "PROJ-1", RemoteLink: tc.rl}},
+			})
+			assert.False(t, isErr)
+			assert.Contains(t, text, "DRY RUN")
+			assert.Contains(t, text, tc.want)
+		})
+	}
+}
+
+// --- remote_link / delete_remote_link batch & dispatch ---
+
+func TestHandleWrite_Batch_RemoteLink_MixedKeys(t *testing.T) {
+	mc := &mockClient{
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, key string, _ jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			if key == "PROJ-2" {
+				return nil, fmt.Errorf("boom")
+			}
+			return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+		},
+	}
+	h := newWriteHandlers(mc)
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "remote_link",
+		Items: []WriteItem{
+			{Key: "PROJ-1", RemoteLink: &RemoteLinkItem{URL: "https://example.com/1", Title: "One"}},
+			{Key: "PROJ-2", RemoteLink: &RemoteLinkItem{URL: "https://example.com/2", Title: "Two"}},
+			{Key: "PROJ-3", RemoteLink: &RemoteLinkItem{URL: "https://example.com/3", Title: "Three"}},
+		},
+	})
+	assert.False(t, isErr)
+	assert.Contains(t, text, "[1]")
+	assert.Contains(t, text, "[2]")
+	assert.Contains(t, text, "[3]")
+	assert.Contains(t, text, "Created remote link 1 on PROJ-1")
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "boom")
+	assert.Contains(t, text, "Created remote link 1 on PROJ-3")
+}
+
+func TestHandleWrite_UnknownAction_ListsRemoteLinkActions(t *testing.T) {
+	h := newWriteHandlers(&mockClient{})
+	text, isErr := callWrite(t, h, WriteArgs{
+		Action: "bogus",
+		Items:  []WriteItem{{Key: "X-1"}},
+	})
+	assert.True(t, isErr)
+	assert.Contains(t, text, "Valid: create, update, delete, transition, comment, edit_comment, move_to_sprint, remote_link, delete_remote_link.")
 }
 
 func TestWriteTransition_ClientError(t *testing.T) {

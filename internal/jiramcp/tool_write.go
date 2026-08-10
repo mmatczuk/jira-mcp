@@ -3,7 +3,10 @@ package jiramcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -34,8 +37,26 @@ type UnlinkItem struct {
 	To     string `json:"to,omitempty" jsonschema:"Issue key on the passive side. Required when link_id is not provided."`
 }
 
+// RemoteLinkItem is the payload for WriteItem.RemoteLink, used by
+// action=remote_link (upsert) and action=delete_remote_link.
+type RemoteLinkItem struct {
+	URL         string             `json:"url,omitempty" jsonschema:"Target URL. Required for action=remote_link."`
+	Title       string             `json:"title,omitempty" jsonschema:"Human-readable label rendered in the Jira UI. Required for action=remote_link."`
+	GlobalID    string             `json:"global_id,omitempty" jsonschema:"Dedup key. When set, repeat calls update the existing link rather than creating duplicates. Recommended pattern: 'system=<host>/document=<id>'. Required for delete_remote_link when link_id is omitted."`
+	LinkID      string             `json:"link_id,omitempty" jsonschema:"Jira's internal remote-link id. Required for delete_remote_link when global_id is omitted. Ignored for action=remote_link."`
+	Application *RemoteLinkAppItem `json:"application,omitempty" jsonschema:"Optional application branding. type is the app identifier (e.g. 'com.example.tool'), name is the label shown in the Web Links panel."`
+	Resolved    *bool              `json:"resolved,omitempty" jsonschema:"Optional resolved-state flag — drives the status icon in the Web Links panel."`
+}
+
+// RemoteLinkAppItem is the optional application-branding sub-object on
+// RemoteLinkItem.
+type RemoteLinkAppItem struct {
+	Type string `json:"type,omitempty" jsonschema:"Free-string application type, e.g. 'com.example.tool'."`
+	Name string `json:"name,omitempty" jsonschema:"Display name, e.g. 'Example Tool'."`
+}
+
 type WriteItem struct {
-	Key               string   `json:"key,omitempty" jsonschema:"Issue key (e.g. PROJ-1). Required for update/delete/transition/comment/edit_comment."`
+	Key               string   `json:"key,omitempty" jsonschema:"Issue key (e.g. PROJ-1). Required for update/delete/transition/comment/edit_comment/move_to_sprint/remote_link/delete_remote_link."`
 	Project           string   `json:"project,omitempty" jsonschema:"Project key for create action."`
 	Summary           string   `json:"summary,omitempty" jsonschema:"Issue summary/title."`
 	IssueType         string   `json:"issue_type,omitempty" jsonschema:"Issue type name (e.g. Bug, Task, Story, Epic)."`
@@ -60,10 +81,12 @@ type WriteItem struct {
 
 	Links   []LinkItem   `json:"links,omitempty" jsonschema:"Issue links to add. Each entry needs type, from, to. Use jira_schema resource=link_types to discover type names. Optional comment posts a comment on the inward issue at link time (markdown only)."`
 	Unlinks []UnlinkItem `json:"unlinks,omitempty" jsonschema:"Issue links to remove. Each entry needs link_id OR (type, from, to) — when the triple is given, the server resolves the link by reading issuelinks on the active issue."`
+
+	RemoteLink *RemoteLinkItem `json:"remote_link,omitempty" jsonschema:"Remote-link payload. Required for action=remote_link and action=delete_remote_link."`
 }
 
 type WriteArgs struct {
-	Action string      `json:"action" jsonschema:"Action: create, update, delete, transition, comment, edit_comment, move_to_sprint."`
+	Action string      `json:"action" jsonschema:"Action: create, update, delete, transition, comment, edit_comment, move_to_sprint, remote_link, delete_remote_link."`
 	Items  []WriteItem `json:"items" jsonschema:"Array of items to process. Even a single operation should be wrapped in an array."`
 	DryRun bool        `json:"dry_run,omitempty" jsonschema:"Preview changes without applying them. Default false."`
 }
@@ -81,6 +104,8 @@ Actions:
 - comment: Add comments. Each item needs: key, comment (Markdown).
 - edit_comment: Edit comments. Each item needs: key, comment_id, comment (Markdown).
 - move_to_sprint: Move issues to a sprint. Each item needs: key, sprint_id.
+- remote_link: Create or update a remote link (Web Links panel). Each item needs: key, remote_link {url, title}. Optional: remote_link.global_id (dedup key — repeat calls with the same global_id update instead of duplicating), remote_link.application {type, name}, remote_link.resolved.
+- delete_remote_link: Delete a remote link. Each item needs: key, remote_link with exactly one of link_id or global_id.
 
 Creating issues:
 - Required custom fields are automatically validated before submission. If any are missing, the error lists each field by name with allowed values.
@@ -111,6 +136,16 @@ func (li LinkItem) arrow() string {
 
 func (u UnlinkItem) triple() string {
 	return fmt.Sprintf("(%s / %s / %s)", u.From, u.Type, u.To)
+}
+
+// idClause renders whichever of LinkID or GlobalID identifies the remote
+// link, for use in the dry-run, error, and success messages of
+// writeDeleteRemoteLink. Exactly one is set by the time this is called.
+func (rl RemoteLinkItem) idClause() string {
+	if rl.LinkID != "" {
+		return fmt.Sprintf("link_id=%s", rl.LinkID)
+	}
+	return fmt.Sprintf("global_id=%s", rl.GlobalID)
 }
 
 // resolveUnlinkDirection returns ok=false when activeKey matches neither
@@ -322,8 +357,12 @@ func (h *handlers) handleWrite(ctx context.Context, _ *mcp.CallToolRequest, args
 			msg, err = h.writeComment(ctx, item, args.DryRun)
 		case "edit_comment":
 			msg, err = h.writeEditComment(ctx, item, args.DryRun)
+		case "remote_link":
+			msg, err = h.writeRemoteLink(ctx, item, args.DryRun)
+		case "delete_remote_link":
+			msg, err = h.writeDeleteRemoteLink(ctx, item, args.DryRun)
 		default:
-			return textResult(fmt.Sprintf("Unknown action %q. Valid: create, update, delete, transition, comment, edit_comment, move_to_sprint.", args.Action), true), nil, nil
+			return textResult(fmt.Sprintf("Unknown action %q. Valid: create, update, delete, transition, comment, edit_comment, move_to_sprint, remote_link, delete_remote_link.", args.Action), true), nil, nil
 		}
 
 		if err != nil {
@@ -919,6 +958,97 @@ func (h *handlers) writeEditComment(ctx context.Context, item WriteItem, dryRun 
 	}
 
 	return fmt.Sprintf("Updated comment %s on %s.", item.CommentID, item.Key), nil
+}
+
+// writeRemoteLink upserts a remote link (Web Links panel entry) via
+// CreateOrUpdateRemoteLink. Jira dedups on global_id: a repeat call with the
+// same global_id updates the existing link instead of creating a duplicate.
+// Without a global_id there is no way to detect a duplicate, so a caveat is
+// appended to the success message.
+func (h *handlers) writeRemoteLink(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+	if item.Key == "" {
+		return "", fmt.Errorf("remote_link requires key")
+	}
+	if item.RemoteLink == nil {
+		return "", fmt.Errorf("remote_link requires a remote_link payload")
+	}
+	rl := item.RemoteLink
+	if rl.URL == "" || rl.Title == "" {
+		return "", fmt.Errorf("remote_link requires remote_link.url and remote_link.title. Got url=%q title=%q", rl.URL, rl.Title)
+	}
+	parsed, err := url.Parse(rl.URL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("remote_link.url %q is not a valid absolute URL (needs scheme and host)", rl.URL)
+	}
+
+	if dryRun {
+		if rl.GlobalID == "" {
+			return fmt.Sprintf("Would create remote link on %s: %s -> %s.", item.Key, rl.Title, rl.URL), nil
+		}
+		return fmt.Sprintf("Would upsert remote link on %s: %s -> %s.", item.Key, rl.Title, rl.URL), nil
+	}
+
+	in := jira.CreateOrUpdateRemoteLinkInput{
+		URL:      rl.URL,
+		Title:    rl.Title,
+		GlobalID: rl.GlobalID,
+		Resolved: rl.Resolved,
+	}
+	if rl.Application != nil {
+		in.Application = &jira.RemoteLinkApp{
+			Type: rl.Application.Type,
+			Name: rl.Application.Name,
+		}
+	}
+
+	result, err := h.client.CreateOrUpdateRemoteLink(ctx, item.Key, in)
+	if err != nil {
+		return "", fmt.Errorf("failed to write remote link on %s: %w", item.Key, err)
+	}
+
+	verb := "Updated"
+	if result.Created {
+		verb = "Created"
+	}
+	msg := fmt.Sprintf("%s remote link %d on %s.", verb, result.ID, item.Key)
+	if rl.GlobalID == "" {
+		msg += " Note: no global_id set — repeat calls with the same payload will create duplicate links."
+	}
+	return msg, nil
+}
+
+// writeDeleteRemoteLink removes a remote link by link_id or global_id.
+// Exactly one of the two must be set; the client rejects both empty, but the
+// "both set" case is only meaningful as a user-facing validation error, so it
+// is caught here rather than in internal/jira.
+func (h *handlers) writeDeleteRemoteLink(ctx context.Context, item WriteItem, dryRun bool) (string, error) {
+	if item.Key == "" {
+		return "", fmt.Errorf("delete_remote_link requires key")
+	}
+	if item.RemoteLink == nil {
+		return "", fmt.Errorf("delete_remote_link requires a remote_link payload")
+	}
+	linkID, globalID := item.RemoteLink.LinkID, item.RemoteLink.GlobalID
+	if linkID != "" && globalID != "" {
+		return "", fmt.Errorf("delete_remote_link on %s: pass exactly one of remote_link.link_id or remote_link.global_id, not both", item.Key)
+	}
+	if linkID == "" && globalID == "" {
+		return "", fmt.Errorf("delete_remote_link on %s requires exactly one of remote_link.link_id or remote_link.global_id", item.Key)
+	}
+
+	if dryRun {
+		return fmt.Sprintf("Would delete remote link on %s by %s.", item.Key, item.RemoteLink.idClause()), nil
+	}
+
+	if err := h.client.DeleteRemoteLink(ctx, item.Key, linkID, globalID); err != nil {
+		var apiErr *jira.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return "", fmt.Errorf("remote link or issue not found on %s (%s): %w. Hint: use jira_read resource=remote_links issue_key=%s to see current links", item.Key, item.RemoteLink.idClause(), err, item.Key)
+		}
+		return "", fmt.Errorf("failed to delete remote link on %s: %w", item.Key, err)
+	}
+
+	return fmt.Sprintf("Deleted remote link on %s by %s.", item.Key, item.RemoteLink.idClause()), nil
 }
 
 // addComment dispatches to AddCommentV2 (wiki-markup string) or AddComment

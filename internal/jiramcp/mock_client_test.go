@@ -11,39 +11,41 @@ import (
 // mockClient implements JiraClient for testing. Set only the Fn fields your
 // test needs; unset methods panic with a clear message.
 type mockClient struct {
-	GetMyselfFn               func(ctx context.Context) (*jira.User, error)
-	SearchUsersFn             func(ctx context.Context, query string) ([]jira.User, error)
-	GetCreateMetaIssueTypesFn func(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error)
-	GetCreateMetaFieldsFn     func(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error)
-	GetIssueFn                func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error)
-	SearchIssuesFn            func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
-	CreateIssueV3Fn           func(ctx context.Context, payload map[string]any) (string, string, error)
-	UpdateIssueV3Fn           func(ctx context.Context, key string, payload map[string]any) error
-	CreateIssueV2Fn           func(ctx context.Context, payload map[string]any) (string, string, error)
-	UpdateIssueV2Fn           func(ctx context.Context, key string, payload map[string]any) error
-	DeleteIssueFn             func(ctx context.Context, key string) error
-	DoTransitionFn            func(ctx context.Context, key, transitionID string) error
-	AddCommentFn              func(ctx context.Context, key string, body any) (string, error)
-	UpdateCommentFn           func(ctx context.Context, key, commentID string, body any) error
-	AddCommentV2Fn            func(ctx context.Context, key, body string) (string, error)
-	UpdateCommentV2Fn         func(ctx context.Context, key, commentID, body string) error
-	GetAllBoardsFn            func(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
-	GetAllSprintsFn           func(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
-	GetSprintIssuesFn         func(ctx context.Context, sprintID int) ([]jira.Issue, error)
-	MoveIssuesToSprintFn      func(ctx context.Context, sprintID int, issueKeys []string) error
-	GetAllProjectsFn          func(ctx context.Context) (*jira.ProjectList, error)
-	GetFieldsFn               func(ctx context.Context) ([]jira.Field, error)
-	GetTransitionsFn          func(ctx context.Context, key string) ([]jira.Transition, error)
-	GetFieldOptionsFn         func(ctx context.Context, fieldID string) ([]json.RawMessage, error)
-	CreateIssueLinkFn         func(ctx context.Context, in jira.CreateIssueLinkInput) error
-	DeleteIssueLinkFn         func(ctx context.Context, linkID string) error
-	GetIssueLinkTypesFn       func(ctx context.Context) ([]jira.IssueLinkType, error)
-	GetRemoteLinksFn          func(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
+	GetMyselfFn                func(ctx context.Context) (*jira.User, error)
+	SearchUsersFn              func(ctx context.Context, query string) ([]jira.User, error)
+	GetCreateMetaIssueTypesFn  func(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error)
+	GetCreateMetaFieldsFn      func(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error)
+	GetIssueFn                 func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error)
+	SearchIssuesFn             func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
+	CreateIssueV3Fn            func(ctx context.Context, payload map[string]any) (string, string, error)
+	UpdateIssueV3Fn            func(ctx context.Context, key string, payload map[string]any) error
+	CreateIssueV2Fn            func(ctx context.Context, payload map[string]any) (string, string, error)
+	UpdateIssueV2Fn            func(ctx context.Context, key string, payload map[string]any) error
+	DeleteIssueFn              func(ctx context.Context, key string) error
+	DoTransitionFn             func(ctx context.Context, key, transitionID string) error
+	AddCommentFn               func(ctx context.Context, key string, body any) (string, error)
+	UpdateCommentFn            func(ctx context.Context, key, commentID string, body any) error
+	AddCommentV2Fn             func(ctx context.Context, key, body string) (string, error)
+	UpdateCommentV2Fn          func(ctx context.Context, key, commentID, body string) error
+	GetAllBoardsFn             func(ctx context.Context, opts *jira.BoardListOptions) ([]jira.Board, bool, error)
+	GetAllSprintsFn            func(ctx context.Context, boardID int, opts *jira.GetAllSprintsOptions) ([]jira.Sprint, bool, error)
+	GetSprintIssuesFn          func(ctx context.Context, sprintID int) ([]jira.Issue, error)
+	MoveIssuesToSprintFn       func(ctx context.Context, sprintID int, issueKeys []string) error
+	GetAllProjectsFn           func(ctx context.Context) (*jira.ProjectList, error)
+	GetFieldsFn                func(ctx context.Context) ([]jira.Field, error)
+	GetTransitionsFn           func(ctx context.Context, key string) ([]jira.Transition, error)
+	GetFieldOptionsFn          func(ctx context.Context, fieldID string) ([]json.RawMessage, error)
+	CreateIssueLinkFn          func(ctx context.Context, in jira.CreateIssueLinkInput) error
+	DeleteIssueLinkFn          func(ctx context.Context, linkID string) error
+	GetIssueLinkTypesFn        func(ctx context.Context) ([]jira.IssueLinkType, error)
+	GetRemoteLinksFn           func(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
+	CreateOrUpdateRemoteLinkFn func(ctx context.Context, issueKey string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error)
+	DeleteRemoteLinkFn         func(ctx context.Context, issueKey, linkID, globalID string) error
 
-	GetAttachmentMetaFn    func(ctx context.Context, id string) (*jira.Attachment, error)
-	GetAttachmentBodyFn    func(ctx context.Context, id string, maxBytes int64) ([]byte, error)
-	PostAttachmentTextFn   func(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error)
-	DeleteAttachmentFn     func(ctx context.Context, id string) error
+	GetAttachmentMetaFn     func(ctx context.Context, id string) (*jira.Attachment, error)
+	GetAttachmentBodyFn     func(ctx context.Context, id string, maxBytes int64) ([]byte, error)
+	PostAttachmentTextFn    func(ctx context.Context, issueKey, filename, body string) (*jira.Attachment, error)
+	DeleteAttachmentFn      func(ctx context.Context, id string) error
 	PostAttachmentTextCount int
 	GetAttachmentBodyCount  int
 }
@@ -242,6 +244,20 @@ func (m *mockClient) GetRemoteLinks(ctx context.Context, issueKey string) ([]jir
 		panic(fmt.Sprintf("mockClient.GetRemoteLinks called but GetRemoteLinksFn not set (issueKey=%s)", issueKey))
 	}
 	return m.GetRemoteLinksFn(ctx, issueKey)
+}
+
+func (m *mockClient) CreateOrUpdateRemoteLink(ctx context.Context, issueKey string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+	if m.CreateOrUpdateRemoteLinkFn == nil {
+		panic(fmt.Sprintf("mockClient.CreateOrUpdateRemoteLink called but CreateOrUpdateRemoteLinkFn not set (issueKey=%s, url=%s)", issueKey, in.URL))
+	}
+	return m.CreateOrUpdateRemoteLinkFn(ctx, issueKey, in)
+}
+
+func (m *mockClient) DeleteRemoteLink(ctx context.Context, issueKey, linkID, globalID string) error {
+	if m.DeleteRemoteLinkFn == nil {
+		panic(fmt.Sprintf("mockClient.DeleteRemoteLink called but DeleteRemoteLinkFn not set (issueKey=%s, linkID=%s, globalID=%s)", issueKey, linkID, globalID))
+	}
+	return m.DeleteRemoteLinkFn(ctx, issueKey, linkID, globalID)
 }
 
 func (m *mockClient) GetAttachmentMeta(ctx context.Context, id string) (*jira.Attachment, error) {
