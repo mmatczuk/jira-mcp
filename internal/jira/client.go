@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andygrunwald/go-jira"
@@ -53,6 +54,9 @@ type Config struct {
 type Client struct {
 	j   *jira.Client
 	cfg Config
+
+	appIDMu         sync.Mutex
+	confluenceAppID string
 }
 
 // New creates a new JIRA client.
@@ -256,11 +260,25 @@ func (c *Client) GetRemoteLinks(ctx context.Context, issueKey string) ([]RemoteL
 // CreateOrUpdateRemoteLinkInput is the request shape for
 // POST /rest/api/3/issue/{issueIdOrKey}/remotelink. Jira upserts on GlobalID.
 type CreateOrUpdateRemoteLinkInput struct {
-	URL         string
-	Title       string
-	GlobalID    string
-	Application *RemoteLinkApp
-	Resolved    *bool
+	URL      string
+	Title    string
+	GlobalID string
+	// Relationship is the label Jira stores for the link's role, e.g. "Wiki Page".
+	// Jira uses it to decide how to render the link: a Confluence page link without
+	// it is stored but rendered as a plain web link.
+	Relationship string
+	Application  *RemoteLinkApp
+	Resolved     *bool
+}
+
+// remoteLinkRequest is the POST body for
+// POST /rest/api/3/issue/{issueIdOrKey}/remotelink. It mirrors RemoteLink minus
+// the server-assigned id and self.
+type remoteLinkRequest struct {
+	GlobalID     string           `json:"globalId,omitempty"`
+	Relationship string           `json:"relationship,omitempty"`
+	Application  *RemoteLinkApp   `json:"application,omitempty"`
+	Object       RemoteLinkObject `json:"object"`
 }
 
 // CreateOrUpdateRemoteLinkResult captures what Jira returns from the upsert.
@@ -283,14 +301,11 @@ func (c *Client) CreateOrUpdateRemoteLink(ctx context.Context, issueKey string, 
 	if in.Resolved != nil {
 		object.Status = &RemoteLinkStatus{Resolved: *in.Resolved}
 	}
-	body := struct {
-		GlobalID    string           `json:"globalId,omitempty"`
-		Application *RemoteLinkApp   `json:"application,omitempty"`
-		Object      RemoteLinkObject `json:"object"`
-	}{
-		GlobalID:    in.GlobalID,
-		Application: in.Application,
-		Object:      object,
+	body := remoteLinkRequest{
+		GlobalID:     in.GlobalID,
+		Relationship: in.Relationship,
+		Application:  in.Application,
+		Object:       object,
 	}
 
 	var result CreateOrUpdateRemoteLinkResult
@@ -316,6 +331,60 @@ func (c *Client) CreateOrUpdateRemoteLink(ctx context.Context, issueKey string, 
 		return nil, err
 	}
 	return &result, nil
+}
+
+// ConfluenceAppIDNote explains what a caller loses when GetConfluenceAppID
+// fails, so handlers can surface it verbatim.
+const ConfluenceAppIDNote = "could not determine the Confluence app id, so the link was written as a plain web link"
+
+// GetConfluenceAppID returns an identifier usable as the appId segment of a
+// Confluence remote-link globalId ("appId=<id>&pageId=<page>"). Jira requires
+// the appId key to be present for a Confluence page link to render as a
+// Confluence entity, but does not validate its value, so any stable per-site id
+// works. It is read from the Confluence applink manifest, which a non-admin can
+// fetch, and falls back to the site cloudId. The result never changes for a
+// site, so it is cached for the life of the client.
+func (c *Client) GetConfluenceAppID(ctx context.Context) (string, error) {
+	c.appIDMu.Lock()
+	defer c.appIDMu.Unlock()
+	if c.confluenceAppID != "" {
+		return c.confluenceAppID, nil
+	}
+
+	var manifest struct {
+		ID string `json:"id"`
+	}
+	manifestErr := c.getJSON(ctx, "wiki/rest/applinks/1.0/manifest", &manifest)
+	if manifestErr == nil && manifest.ID != "" {
+		c.confluenceAppID = manifest.ID
+		return c.confluenceAppID, nil
+	}
+
+	var tenant struct {
+		CloudID string `json:"cloudId"`
+	}
+	if err := c.getJSON(ctx, "_edge/tenant_info", &tenant); err != nil {
+		return "", fmt.Errorf("determine confluence app id: applink manifest: %v; tenant info: %w", manifestErr, err)
+	}
+	if tenant.CloudID == "" {
+		return "", fmt.Errorf("determine confluence app id: applink manifest: %v; tenant info returned no cloudId", manifestErr)
+	}
+	c.confluenceAppID = tenant.CloudID
+	return c.confluenceAppID, nil
+}
+
+// getJSON performs a retried GET against a site-relative path and decodes the
+// response into out. Accept is set explicitly because some Atlassian endpoints
+// outside the Jira REST API — the applink manifest among them — default to XML.
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	return c.retry(ctx, func() (*jira.Response, error) {
+		req, err := c.j.NewRequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		return c.j.Do(req, out)
+	})
 }
 
 // DeleteRemoteLink removes a remote link via

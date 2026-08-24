@@ -40,12 +40,14 @@ type UnlinkItem struct {
 // RemoteLinkItem is the payload for WriteItem.RemoteLink, used by
 // action=remote_link (upsert) and action=delete_remote_link.
 type RemoteLinkItem struct {
-	URL         string             `json:"url,omitempty" jsonschema:"Target URL. Required for action=remote_link."`
-	Title       string             `json:"title,omitempty" jsonschema:"Human-readable label rendered in the Jira UI. Required for action=remote_link."`
-	GlobalID    string             `json:"global_id,omitempty" jsonschema:"Dedup key. When set, repeat calls update the existing link rather than creating duplicates. Recommended pattern: 'system=<host>/document=<id>'. Required for delete_remote_link when link_id is omitted."`
-	LinkID      string             `json:"link_id,omitempty" jsonschema:"Jira's internal remote-link id. Required for delete_remote_link when global_id is omitted. Ignored for action=remote_link."`
-	Application *RemoteLinkAppItem `json:"application,omitempty" jsonschema:"Optional application branding. type is the app identifier (e.g. 'com.example.tool'), name is the label shown in the Web Links panel."`
-	Resolved    *bool              `json:"resolved,omitempty" jsonschema:"Optional resolved-state flag — drives the status icon in the Web Links panel."`
+	URL              string             `json:"url,omitempty" jsonschema:"Target URL. Required for action=remote_link."`
+	Title            string             `json:"title,omitempty" jsonschema:"Human-readable label rendered in the Jira UI. Required for action=remote_link."`
+	GlobalID         string             `json:"global_id,omitempty" jsonschema:"Dedup key. When set, repeat calls update the existing link rather than creating duplicates. Recommended pattern: 'system=<host>/document=<id>'. Required for delete_remote_link when link_id is omitted."`
+	LinkID           string             `json:"link_id,omitempty" jsonschema:"Jira's internal remote-link id. Required for delete_remote_link when global_id is omitted. Ignored for action=remote_link."`
+	Relationship     string             `json:"relationship,omitempty" jsonschema:"Link role label Jira stores for the link, e.g. 'Wiki Page'. Optional — Confluence page links get it automatically."`
+	ConfluencePageID string             `json:"confluence_page_id,omitempty" jsonschema:"Confluence page id. Set this to force the Confluence page treatment when url is a short link or a form the tool cannot parse a page id out of. Not needed for a normal /wiki/ page URL."`
+	Application      *RemoteLinkAppItem `json:"application,omitempty" jsonschema:"Optional application branding. type is the app identifier (e.g. 'com.example.tool'), name is the label shown in the Web Links panel."`
+	Resolved         *bool              `json:"resolved,omitempty" jsonschema:"Optional resolved-state flag — drives the status icon in the Web Links panel."`
 }
 
 // RemoteLinkAppItem is the optional application-branding sub-object on
@@ -104,7 +106,7 @@ Actions:
 - comment: Add comments. Each item needs: key, comment (Markdown).
 - edit_comment: Edit comments. Each item needs: key, comment_id, comment (Markdown).
 - move_to_sprint: Move issues to a sprint. Each item needs: key, sprint_id.
-- remote_link: Create or update a remote link (Web Links panel). Each item needs: key, remote_link {url, title}. Optional: remote_link.global_id (dedup key — repeat calls with the same global_id update instead of duplicating), remote_link.application {type, name}, remote_link.resolved.
+- remote_link: Create or update a remote link (Web Links panel). Each item needs: key, remote_link {url, title}. Optional: remote_link.global_id (dedup key — repeat calls with the same global_id update instead of duplicating), remote_link.application {type, name}, remote_link.resolved, remote_link.relationship (link role label). A Confluence /wiki/ page URL is detected automatically and linked as a Confluence page (Confluence content panel, live page title) rather than a plain web link; pass remote_link.confluence_page_id when the URL is a short link, or an explicit global_id/application to opt out.
 - delete_remote_link: Delete a remote link. Each item needs: key, remote_link with exactly one of link_id or global_id.
 
 Creating issues:
@@ -981,24 +983,40 @@ func (h *handlers) writeRemoteLink(ctx context.Context, item WriteItem, dryRun b
 		return "", fmt.Errorf("remote_link.url %q is not a valid absolute URL (needs scheme and host)", rl.URL)
 	}
 
+	pageID := rl.ConfluencePageID
+	if pageID == "" {
+		pageID = confluencePageIDFromURL(rl.URL)
+	}
+
 	if dryRun {
-		if rl.GlobalID == "" {
-			return fmt.Sprintf("Would create remote link on %s: %s -> %s.", item.Key, rl.Title, rl.URL), nil
+		verb := "create"
+		if rl.GlobalID != "" {
+			verb = "upsert"
 		}
-		return fmt.Sprintf("Would upsert remote link on %s: %s -> %s.", item.Key, rl.Title, rl.URL), nil
+		msg := fmt.Sprintf("Would %s remote link on %s: %s -> %s.", verb, item.Key, rl.Title, rl.URL)
+		if pageID != "" {
+			msg += fmt.Sprintf(" Linked as Confluence page %s.", pageID)
+		}
+		return msg, nil
 	}
 
 	in := jira.CreateOrUpdateRemoteLinkInput{
-		URL:      rl.URL,
-		Title:    rl.Title,
-		GlobalID: rl.GlobalID,
-		Resolved: rl.Resolved,
+		URL:          rl.URL,
+		Title:        rl.Title,
+		GlobalID:     rl.GlobalID,
+		Relationship: rl.Relationship,
+		Resolved:     rl.Resolved,
 	}
 	if rl.Application != nil {
 		in.Application = &jira.RemoteLinkApp{
 			Type: rl.Application.Type,
 			Name: rl.Application.Name,
 		}
+	}
+
+	var note string
+	if pageID != "" {
+		note = h.applyConfluenceShorthand(ctx, pageID, &in)
 	}
 
 	result, err := h.client.CreateOrUpdateRemoteLink(ctx, item.Key, in)
@@ -1011,10 +1029,84 @@ func (h *handlers) writeRemoteLink(ctx context.Context, item WriteItem, dryRun b
 		verb = "Created"
 	}
 	msg := fmt.Sprintf("%s remote link %d on %s.", verb, result.ID, item.Key)
-	if rl.GlobalID == "" {
+	if in.GlobalID == "" {
 		msg += " Note: no global_id set — repeat calls with the same payload will create duplicate links."
 	}
+	if note != "" {
+		msg += " Note: " + note + "."
+	}
 	return msg, nil
+}
+
+// Confluence entity-link constants. Jira renders a remote link as a Confluence
+// page (Confluence content panel, live page title) only when the globalId
+// carries both an appId and a pageId, and application.type is the Confluence
+// app id; the appId value itself is not validated. relationship is stored but
+// drives no rendering — it is set to match what the Jira UI writes.
+const (
+	confluenceAppType         = "com.atlassian.confluence"
+	confluenceAppName         = "System Confluence"
+	confluenceRelationship    = "Wiki Page"
+	confluenceGlobalIDPattern = "appId=%s&pageId=%s"
+)
+
+// applyConfluenceShorthand fills the fields that make Jira render a link to
+// pageID as a Confluence page. Fields the caller set explicitly are left alone,
+// so an explicit global_id, relationship or application always wins. Returns a
+// note for the result message when the app id could not be determined and the
+// link therefore stays a plain web link.
+func (h *handlers) applyConfluenceShorthand(ctx context.Context, pageID string, in *jira.CreateOrUpdateRemoteLinkInput) string {
+	if in.GlobalID == "" {
+		appID, err := h.client.GetConfluenceAppID(ctx)
+		if err != nil {
+			return jira.ConfluenceAppIDNote
+		}
+		in.GlobalID = fmt.Sprintf(confluenceGlobalIDPattern, appID, pageID)
+	}
+	if in.Relationship == "" {
+		in.Relationship = confluenceRelationship
+	}
+	if in.Application == nil {
+		in.Application = &jira.RemoteLinkApp{Type: confluenceAppType, Name: confluenceAppName}
+	}
+	return ""
+}
+
+// confluencePageIDFromURL extracts the Confluence page id from a Confluence
+// Cloud page URL, returning "" when the URL is not one. Recognised forms:
+//
+//	/wiki/pages/viewpage.action?pageId=123
+//	/wiki/spaces/<space>/pages/123
+//	/wiki/spaces/<space>/pages/123/<title>
+//
+// Short links (/wiki/x/<key>) carry no page id and are not resolved here —
+// callers pass confluence_page_id for those.
+func confluencePageIDFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segments) == 0 || segments[0] != "wiki" {
+		return ""
+	}
+	if id := u.Query().Get("pageId"); isAllDigits(id) {
+		return id
+	}
+	for i := 0; i+1 < len(segments); i++ {
+		if segments[i] == "pages" && isAllDigits(segments[i+1]) {
+			return segments[i+1]
+		}
+	}
+	return ""
+}
+
+// isAllDigits reports whether s is a non-empty run of ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' }) < 0
 }
 
 // writeDeleteRemoteLink removes a remote link by link_id or global_id.

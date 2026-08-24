@@ -23,6 +23,7 @@ Four tools that compose naturally: schema to discover, read to find, write to ch
 - **Required field validation** — before creating an issue, jira-mcp checks the project's required fields and returns missing ones by name with allowed values. Your agent gets it right on the first try instead of decoding opaque `customfield_10104` errors.
 - **Issue type validation** — if the issue type doesn't exist in the target project, the error lists available types immediately.
 - **Issue linking by name** — `jira_write` accepts `links: [{type: "Blocks", from, to}]` and resolves type names to the right link. Discover available types via `jira_schema resource=link_types`. No raw link IDs, no inward/outward confusion. `parent_key` sets an Epic (or other parent) in the same call.
+- **Confluence page links** — `jira_write action=remote_link` detects a Confluence `/wiki/` page URL and writes the link as a Confluence page, so it lands in the issue's Confluence content panel with the page's live title instead of the Web links panel as a plain URL. Jira needs an undocumented `globalId` shape and application type for that; jira-mcp derives both. Pass `remote_link.confluence_page_id` for a short link, or an explicit `global_id` to opt out.
 - **Wiki-markup safety** — descriptions and comments expect Markdown and are converted to ADF on the v3 API. Wiki-markup tokens (`{code}`, `{{inline}}`, `h1.`, `[text|url]`) are detected and rejected so a `jira_read → jira_write` round-trip cannot silently render as literal tokens.
 
 ## Markdown support that just works
