@@ -1929,6 +1929,7 @@ func TestWriteRemoteLink_Success_Created(t *testing.T) {
 			assert.Equal(t, "https://example.com/doc/1", in.URL)
 			assert.Equal(t, "Design doc", in.Title)
 			assert.Equal(t, "system=example.com/document=1", in.GlobalID)
+			assert.Equal(t, "Wiki Page", in.Relationship)
 			require.NotNil(t, in.Application)
 			assert.Equal(t, "com.example.tool", in.Application.Type)
 			assert.Equal(t, "Example Tool", in.Application.Name)
@@ -1944,11 +1945,12 @@ func TestWriteRemoteLink_Success_Created(t *testing.T) {
 		Items: []WriteItem{{
 			Key: "PROJ-1",
 			RemoteLink: &RemoteLinkItem{
-				URL:         "https://example.com/doc/1",
-				Title:       "Design doc",
-				GlobalID:    "system=example.com/document=1",
-				Application: &RemoteLinkAppItem{Type: "com.example.tool", Name: "Example Tool"},
-				Resolved:    &resolved,
+				URL:          "https://example.com/doc/1",
+				Title:        "Design doc",
+				GlobalID:     "system=example.com/document=1",
+				Relationship: "Wiki Page",
+				Application:  &RemoteLinkAppItem{Type: "com.example.tool", Name: "Example Tool"},
+				Resolved:     &resolved,
 			},
 		}},
 	})
@@ -1958,7 +1960,8 @@ func TestWriteRemoteLink_Success_Created(t *testing.T) {
 
 func TestWriteRemoteLink_Success_Updated(t *testing.T) {
 	mc := &mockClient{
-		CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, _ jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+		CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+			assert.Empty(t, in.Relationship, "relationship must stay empty when the item does not set it")
 			return &jira.CreateOrUpdateRemoteLinkResult{ID: 10000, Created: false}, nil
 		},
 	}
@@ -2837,4 +2840,177 @@ func TestWriteCreate_PreflightWarningInDryRun(t *testing.T) {
 	assert.Contains(t, text, "Would create issue")
 	assert.Contains(t, text, "Preflight warning")
 	assert.Contains(t, text, "Redpanda Version")
+}
+
+func TestConfluencePageIDFromURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "viewpage action", url: "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=4798087278", want: "4798087278"},
+		{name: "spaces path with title", url: "https://example.atlassian.net/wiki/spaces/ENG/pages/123456/Design+Doc", want: "123456"},
+		{name: "spaces path without title", url: "https://example.atlassian.net/wiki/spaces/ENG/pages/123456", want: "123456"},
+		{name: "extra query params", url: "https://example.atlassian.net/wiki/pages/viewpage.action?pageId=99&focusedCommentId=1", want: "99"},
+		{name: "tiny link is not resolvable", url: "https://example.atlassian.net/wiki/x/AbCd", want: ""},
+		{name: "confluence space home", url: "https://example.atlassian.net/wiki/spaces/ENG/overview", want: ""},
+		{name: "non-confluence url", url: "https://example.com/doc/1", want: ""},
+		{name: "jira issue url", url: "https://example.atlassian.net/browse/PROJ-1", want: ""},
+		{name: "non-numeric page segment", url: "https://example.atlassian.net/wiki/spaces/ENG/pages/notanid/Title", want: ""},
+		{name: "malformed url", url: "::not a url::", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, confluencePageIDFromURL(tt.url))
+		})
+	}
+}
+
+func TestWriteRemoteLink_ConfluenceShorthand(t *testing.T) {
+	const appID = "11111111-1111-1111-1111-111111111111"
+
+	t.Run("derives globalId, relationship and application from a wiki url", func(t *testing.T) {
+		var got jira.CreateOrUpdateRemoteLinkInput
+		mc := &mockClient{
+			GetConfluenceAppIDFn: func(context.Context) (string, error) { return appID, nil },
+			CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+				got = in
+				return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+			},
+		}
+		h := newWriteHandlers(mc)
+		text, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			Items: []WriteItem{{
+				Key: "PROJ-1",
+				RemoteLink: &RemoteLinkItem{
+					URL:   "https://example.atlassian.net/wiki/spaces/ENG/pages/123456/Design+Doc",
+					Title: "Design Doc",
+				},
+			}},
+		})
+		assert.False(t, isErr)
+		assert.Contains(t, text, "Created remote link 1 on PROJ-1.")
+		assert.Equal(t, "appId="+appID+"&pageId=123456", got.GlobalID)
+		assert.Equal(t, "Wiki Page", got.Relationship)
+		require.NotNil(t, got.Application)
+		assert.Equal(t, "com.atlassian.confluence", got.Application.Type)
+		assert.Equal(t, "System Confluence", got.Application.Name)
+	})
+
+	t.Run("accepts an explicit confluence_page_id", func(t *testing.T) {
+		var got jira.CreateOrUpdateRemoteLinkInput
+		mc := &mockClient{
+			GetConfluenceAppIDFn: func(context.Context) (string, error) { return appID, nil },
+			CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+				got = in
+				return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+			},
+		}
+		h := newWriteHandlers(mc)
+		_, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			Items: []WriteItem{{
+				Key: "PROJ-1",
+				RemoteLink: &RemoteLinkItem{
+					URL:              "https://example.atlassian.net/wiki/x/AbCd",
+					Title:            "Design Doc",
+					ConfluencePageID: "123456",
+				},
+			}},
+		})
+		assert.False(t, isErr)
+		assert.Equal(t, "appId="+appID+"&pageId=123456", got.GlobalID)
+	})
+
+	t.Run("explicit fields win over derived values", func(t *testing.T) {
+		var got jira.CreateOrUpdateRemoteLinkInput
+		mc := &mockClient{
+			GetConfluenceAppIDFn: func(context.Context) (string, error) { return appID, nil },
+			CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+				got = in
+				return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+			},
+		}
+		h := newWriteHandlers(mc)
+		_, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			Items: []WriteItem{{
+				Key: "PROJ-1",
+				RemoteLink: &RemoteLinkItem{
+					URL:          "https://example.atlassian.net/wiki/spaces/ENG/pages/123456/Design+Doc",
+					Title:        "Design Doc",
+					GlobalID:     "system=example.com/document=1",
+					Relationship: "mentioned in",
+					Application:  &RemoteLinkAppItem{Type: "com.example.tool", Name: "Example Tool"},
+				},
+			}},
+		})
+		assert.False(t, isErr)
+		assert.Equal(t, "system=example.com/document=1", got.GlobalID)
+		assert.Equal(t, "mentioned in", got.Relationship)
+		require.NotNil(t, got.Application)
+		assert.Equal(t, "com.example.tool", got.Application.Type)
+	})
+
+	t.Run("non-confluence url does not call the app id lookup", func(t *testing.T) {
+		var got jira.CreateOrUpdateRemoteLinkInput
+		mc := &mockClient{
+			CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+				got = in
+				return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+			},
+		}
+		h := newWriteHandlers(mc)
+		_, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			Items: []WriteItem{{
+				Key:        "PROJ-1",
+				RemoteLink: &RemoteLinkItem{URL: "https://example.com/doc/1", Title: "Doc"},
+			}},
+		})
+		assert.False(t, isErr) // mockClient panics if GetConfluenceAppIDFn is called unset
+		assert.Empty(t, got.GlobalID)
+		assert.Empty(t, got.Relationship)
+		assert.Nil(t, got.Application)
+	})
+
+	t.Run("app id lookup failure writes a plain link and notes it", func(t *testing.T) {
+		var got jira.CreateOrUpdateRemoteLinkInput
+		mc := &mockClient{
+			GetConfluenceAppIDFn: func(context.Context) (string, error) {
+				return "", fmt.Errorf("determine confluence app id: forbidden")
+			},
+			CreateOrUpdateRemoteLinkFn: func(_ context.Context, _ string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error) {
+				got = in
+				return &jira.CreateOrUpdateRemoteLinkResult{ID: 1, Created: true}, nil
+			},
+		}
+		h := newWriteHandlers(mc)
+		text, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			Items: []WriteItem{{
+				Key:        "PROJ-1",
+				RemoteLink: &RemoteLinkItem{URL: "https://example.atlassian.net/wiki/spaces/ENG/pages/123456", Title: "Design Doc"},
+			}},
+		})
+		assert.False(t, isErr)
+		assert.Contains(t, text, "Created remote link 1 on PROJ-1.")
+		assert.Contains(t, text, jira.ConfluenceAppIDNote)
+		assert.Empty(t, got.GlobalID, "no derived globalId when the app id is unknown")
+	})
+
+	t.Run("dry run reports the confluence treatment without a lookup", func(t *testing.T) {
+		h := newWriteHandlers(&mockClient{})
+		text, isErr := callWrite(t, h, WriteArgs{
+			Action: "remote_link",
+			DryRun: true,
+			Items: []WriteItem{{
+				Key:        "PROJ-1",
+				RemoteLink: &RemoteLinkItem{URL: "https://example.atlassian.net/wiki/spaces/ENG/pages/123456", Title: "Design Doc"},
+			}},
+		})
+		assert.False(t, isErr)
+		assert.Contains(t, text, "Confluence page")
+	})
 }

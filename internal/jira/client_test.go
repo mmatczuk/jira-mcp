@@ -676,6 +676,45 @@ func TestCreateOrUpdateRemoteLink_ResolvedFalse(t *testing.T) {
 	assert.Equal(t, false, status["resolved"], "explicit false must reach Jira, not be omitted")
 }
 
+func TestCreateOrUpdateRemoteLink_SendsRelationship(t *testing.T) {
+	tests := []struct {
+		name         string
+		relationship string
+		wantPresent  bool
+	}{
+		{name: "set", relationship: "Wiki Page", wantPresent: true},
+		{name: "empty", relationship: "", wantPresent: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id": 10003, "self": "https://example.com/rest/api/3/issue/PROJ-1/remotelink/10003"}`))
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL)
+			_, err := c.CreateOrUpdateRemoteLink(context.Background(), "PROJ-1", CreateOrUpdateRemoteLinkInput{
+				URL:          "https://example.com/wiki/pages/viewpage.action?pageId=1",
+				Title:        "Design",
+				Relationship: tt.relationship,
+			})
+			require.NoError(t, err)
+
+			got, has := gotBody["relationship"]
+			if !tt.wantPresent {
+				assert.False(t, has, "relationship key must be absent when Relationship is empty")
+				return
+			}
+			require.True(t, has, "relationship key must be present when Relationship is set")
+			assert.Equal(t, tt.relationship, got)
+		})
+	}
+}
+
 func TestCreateOrUpdateRemoteLink_Updated200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1191,4 +1230,64 @@ func TestAttachmentID_UnmarshalJSON(t *testing.T) {
 			assert.Equal(t, tc.want, string(id))
 		})
 	}
+}
+
+// --- GetConfluenceAppID ---
+
+func TestGetConfluenceAppID_FromApplinksManifest(t *testing.T) {
+	var paths []string
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"11111111-1111-1111-1111-111111111111","typeId":"confluence"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetConfluenceAppID(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", got)
+	assert.Equal(t, []string{"/wiki/rest/applinks/1.0/manifest"}, paths)
+	// The applink manifest serves XML unless JSON is asked for explicitly.
+	assert.Equal(t, "application/json", gotAccept)
+
+	// A second call is served from the cache — the appId never changes for a site.
+	got, err = c.GetConfluenceAppID(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", got)
+	assert.Len(t, paths, 1, "second call must not hit the network")
+}
+
+func TestGetConfluenceAppID_FallsBackToCloudID(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/wiki/rest/applinks/1.0/manifest" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Only an admin can access this resource."}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"cloudId":"22222222-2222-2222-2222-222222222222"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	got, err := c.GetConfluenceAppID(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "22222222-2222-2222-2222-222222222222", got)
+	assert.Equal(t, []string{"/wiki/rest/applinks/1.0/manifest", "/_edge/tenant_info"}, paths)
+}
+
+func TestGetConfluenceAppID_BothSourcesFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetConfluenceAppID(context.Background())
+	require.Error(t, err)
 }

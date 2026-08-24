@@ -40,6 +40,7 @@ type mockClient struct {
 	GetIssueLinkTypesFn        func(ctx context.Context) ([]jira.IssueLinkType, error)
 	GetRemoteLinksFn           func(ctx context.Context, issueKey string) ([]jira.RemoteLink, error)
 	CreateOrUpdateRemoteLinkFn func(ctx context.Context, issueKey string, in jira.CreateOrUpdateRemoteLinkInput) (*jira.CreateOrUpdateRemoteLinkResult, error)
+	GetConfluenceAppIDFn       func(ctx context.Context) (string, error)
 	DeleteRemoteLinkFn         func(ctx context.Context, issueKey, linkID, globalID string) error
 
 	GetAttachmentMetaFn     func(ctx context.Context, id string) (*jira.Attachment, error)
@@ -288,4 +289,11 @@ func (m *mockClient) DeleteAttachment(ctx context.Context, id string) error {
 		panic(fmt.Sprintf("mockClient.DeleteAttachment called but DeleteAttachmentFn not set (id=%s)", id))
 	}
 	return m.DeleteAttachmentFn(ctx, id)
+}
+
+func (m *mockClient) GetConfluenceAppID(ctx context.Context) (string, error) {
+	if m.GetConfluenceAppIDFn == nil {
+		panic("mockClient.GetConfluenceAppID called but GetConfluenceAppIDFn not set")
+	}
+	return m.GetConfluenceAppIDFn(ctx)
 }
