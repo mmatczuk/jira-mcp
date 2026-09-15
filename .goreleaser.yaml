@@ -61,12 +61,14 @@ homebrew_casks:
     homepage: https://github.com/mmatczuk/jira-mcp
     description: JIRA MCP server — give your AI assistant full JIRA access
     license: MIT
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/jira-mcp"]
-          end
+    # Strip the quarantine flag from the unsigned binary. GoReleaser's
+    # `hooks.post.install` emits a `postflight` block, which Homebrew 7
+    # deprecated in favour of the declarative `postflight_steps`, so the
+    # stanza is written directly instead.
+    custom_block: |
+      postflight_steps do
+        run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "jira-mcp"], chdir: "."
+      end if OS.mac?
 
 # Multi-arch Docker image pushed to Docker Hub as :latest only.
 dockers_v2:
