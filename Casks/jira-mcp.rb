@@ -33,11 +33,9 @@ cask "jira-mcp" do
 
   binary "jira-mcp"
 
-  postflight do
-    if OS.mac?
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/jira-mcp"]
-    end
-  end
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "jira-mcp"], chdir: "."
+  end if OS.mac?
 
   # No zap stanza required
 end
