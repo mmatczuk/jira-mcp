@@ -33,9 +33,7 @@ type (
 	User                 = jira.User
 )
 
-// ChangelogPage holds the paging counts of an issue's embedded changelog,
-// which go-jira's Changelog drops. Jira caps the embedded histories (100 on
-// GET issue, 40 on search/jql), so Total can exceed the histories returned.
+// ChangelogPage holds the paging counts that go-jira's Changelog drops.
 type ChangelogPage struct {
 	StartAt    int `json:"startAt"`
 	MaxResults int `json:"maxResults"`
