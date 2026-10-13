@@ -140,12 +140,12 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		if args.Expand != "" {
 			opts.Expand = args.Expand
 		}
-		issue, page, err := h.client.GetIssue(ctx, args.Keys[0], opts)
+		issue, changelogTotal, err := h.client.GetIssue(ctx, args.Keys[0], opts)
 		if err != nil {
 			return formatReadResult("Fetched 0 issue(s)", nil, []string{fmt.Sprintf("%s: %v", args.Keys[0], err)})
 		}
 		render := newCustomfieldRenderer(ctx, h.client, args)
-		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, page, render)}, nil)
+		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, changelogTotal, render)}, nil)
 	}
 
 	// Build issueKey in (...) JQL for multi-key fetch.
@@ -173,7 +173,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogPages[sr.Issues[i].ID], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogTotals[sr.Issues[i].ID], render))
 	}
 	return formatReadResult(fmt.Sprintf("Fetched %d issue(s)", len(results)), results, nil)
 }
@@ -200,7 +200,7 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogPages[sr.Issues[i].ID], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogTotals[sr.Issues[i].ID], render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) (total %d). JQL: %s", len(results), sr.Total, args.JQL)
@@ -337,7 +337,7 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range issues {
-		results = append(results, issueToMap(&issues[i], nil, render))
+		results = append(results, issueToMap(&issues[i], 0, render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) in sprint %d", len(results), args.SprintID)
@@ -417,7 +417,7 @@ func commentToMap(c *jira.Comment) map[string]any {
 
 // changelogToMap omits fromString/toString: a description edit carries the
 // full old and new text, which would bloat the response.
-func changelogToMap(c *jira.Changelog, page *jira.ChangelogPage) (map[string]any, bool) {
+func changelogToMap(c *jira.Changelog, total int) (map[string]any, bool) {
 	if c == nil || len(c.Histories) == 0 {
 		return nil, false
 	}
@@ -426,11 +426,9 @@ func changelogToMap(c *jira.Changelog, page *jira.ChangelogPage) (map[string]any
 		histories = append(histories, changelogHistoryToMap(&c.Histories[i]))
 	}
 	m := map[string]any{"histories": histories}
-	if page != nil {
-		m["startAt"] = page.StartAt
-		m["maxResults"] = page.MaxResults
-		m["total"] = page.Total
-		m["incomplete"] = page.Total > len(histories)
+	if total > 0 {
+		m["total"] = total
+		m["incomplete"] = total > len(histories)
 	}
 	return m, true
 }
@@ -488,9 +486,9 @@ func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) 
 	}, true
 }
 
-// issueToMap builds the output for one issue. page is the paging counts of
-// the embedded changelog, or nil when the caller has none.
-func issueToMap(issue *jira.Issue, page *jira.ChangelogPage, render customfieldRenderer) map[string]any {
+// issueToMap builds the output for one issue. changelogTotal is the history
+// count of the embedded changelog, or 0 when the caller does not know it.
+func issueToMap(issue *jira.Issue, changelogTotal int, render customfieldRenderer) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
 		"id":   issue.ID,
@@ -575,7 +573,7 @@ func issueToMap(issue *jira.Issue, page *jira.ChangelogPage, render customfieldR
 		}
 		m["fields"] = fields
 	}
-	if changelog, ok := changelogToMap(issue.Changelog, page); ok {
+	if changelog, ok := changelogToMap(issue.Changelog, changelogTotal); ok {
 		m["changelog"] = changelog
 	}
 

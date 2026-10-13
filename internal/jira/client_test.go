@@ -422,24 +422,24 @@ func TestUpdateCommentV2_HappyPath(t *testing.T) {
 	assert.Equal(t, "h2. edited", gotBody["body"])
 }
 
-// --- Changelog paging counts ---
+// --- Changelog total ---
 
-func TestGetIssue_ChangelogPage(t *testing.T) {
+func TestGetIssue_ChangelogTotal(t *testing.T) {
 	tests := []struct {
-		name     string
-		body     string
-		wantPage *ChangelogPage
+		name      string
+		body      string
+		wantTotal int
 	}{
 		{
 			name: "changelog expanded",
 			body: `{"id":"1","key":"PROJ-1","fields":{"summary":"s"},
 				"changelog":{"startAt":0,"maxResults":100,"total":112,"histories":[{"id":"7","created":"2026-10-13T08:51:54.880+0100"}]}}`,
-			wantPage: &ChangelogPage{StartAt: 0, MaxResults: 100, Total: 112},
+			wantTotal: 112,
 		},
 		{
-			name:     "no changelog",
-			body:     `{"id":"1","key":"PROJ-1","fields":{"summary":"s"}}`,
-			wantPage: nil,
+			name:      "no changelog",
+			body:      `{"id":"1","key":"PROJ-1","fields":{"summary":"s"}}`,
+			wantTotal: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -454,14 +454,14 @@ func TestGetIssue_ChangelogPage(t *testing.T) {
 			defer srv.Close()
 
 			c := newTestClient(t, srv.URL)
-			issue, page, err := c.GetIssue(context.Background(), "PROJ-1", &GetQueryOptions{Fields: "summary", Expand: "changelog"})
+			issue, changelogTotal, err := c.GetIssue(context.Background(), "PROJ-1", &GetQueryOptions{Fields: "summary", Expand: "changelog"})
 			require.NoError(t, err)
 			assert.Equal(t, "/rest/api/2/issue/PROJ-1", gotPath)
 			assert.Equal(t, "expand=changelog&fields=summary", gotQuery)
 			assert.Equal(t, "PROJ-1", issue.Key)
 			assert.Equal(t, "s", issue.Fields.Summary)
-			assert.Equal(t, tc.wantPage, page)
-			if tc.wantPage != nil {
+			assert.Equal(t, tc.wantTotal, changelogTotal)
+			if tc.wantTotal > 0 {
 				require.NotNil(t, issue.Changelog)
 				assert.Len(t, issue.Changelog.Histories, 1)
 			}
@@ -469,7 +469,7 @@ func TestGetIssue_ChangelogPage(t *testing.T) {
 	}
 }
 
-func TestSearchIssues_ChangelogPages(t *testing.T) {
+func TestSearchIssues_ChangelogTotals(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"issues":[
@@ -487,7 +487,7 @@ func TestSearchIssues_ChangelogPages(t *testing.T) {
 	assert.Equal(t, "PROJ-1", sr.Issues[0].Key)
 	assert.Equal(t, "b", sr.Issues[1].Fields.Summary)
 	assert.Equal(t, "next", sr.NextPageToken)
-	assert.Equal(t, map[string]*ChangelogPage{"1": {StartAt: 0, MaxResults: 40, Total: 112}}, sr.ChangelogPages)
+	assert.Equal(t, map[string]int{"1": 112}, sr.ChangelogTotals)
 }
 
 // --- Issue link types ---

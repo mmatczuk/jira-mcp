@@ -993,9 +993,9 @@ func makeIssueWithLinks(entries ...linkFixture) *jira.Issue {
 
 func TestResolveLinkID_OutwardMatch(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			assert.Equal(t, "PROJ-1", key)
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil, nil
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), 0, nil
 		},
 	}
 	h := newWriteHandlers(mc)
@@ -1006,8 +1006,8 @@ func TestResolveLinkID_OutwardMatch(t *testing.T) {
 
 func TestResolveLinkID_InwardMatch(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil, nil
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), 0, nil
 		},
 	}
 	h := newWriteHandlers(mc)
@@ -1018,11 +1018,11 @@ func TestResolveLinkID_InwardMatch(t *testing.T) {
 
 func TestResolveLinkID_MultipleMatches_Errors(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			return makeIssueWithLinks(
 				linkFixture{"10042", "Blocks", "PROJ-2", true},
 				linkFixture{"10043", "Blocks", "PROJ-2", true},
-			), nil, nil
+			), 0, nil
 		},
 	}
 	h := newWriteHandlers(mc)
@@ -1034,8 +1034,8 @@ func TestResolveLinkID_MultipleMatches_Errors(t *testing.T) {
 
 func TestResolveLinkID_NoMatches_Errors(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
-			return makeIssueWithLinks(), nil, nil
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
+			return makeIssueWithLinks(), 0, nil
 		},
 	}
 	h := newWriteHandlers(mc)
@@ -1047,8 +1047,8 @@ func TestResolveLinkID_NoMatches_Errors(t *testing.T) {
 
 func TestResolveLinkID_TypeNameCaseInsensitive(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), nil, nil
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", true}), 0, nil
 		},
 	}
 	h := newWriteHandlers(mc)
@@ -1080,12 +1080,12 @@ func TestApplyUnlinks_ByTriple(t *testing.T) {
 	getCalled := false
 	deleted := ""
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			getCalled = true
 			// From=PROJ-1 is the active issue; per applyLinks (From=inward) it
 			// resolves to linkInward, so the other key (PROJ-2) sits on the
 			// outward side: activeIsOutward=false.
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil, nil
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), 0, nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID
@@ -1105,14 +1105,14 @@ func TestApplyUnlinks_ByTriple(t *testing.T) {
 func TestApplyUnlinks_ByTriple_ActiveIsToSide(t *testing.T) {
 	deleted := ""
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			assert.Equal(t, "PROJ-2", key, "GetIssue must be called on the active key, not the From key")
 			// To=PROJ-2 is the active issue; per applyLinks (To=outward) it
 			// resolves to linkOutward, so the other key (PROJ-1) sits on the
 			// inward side: activeIsOutward=true. The fixture only matches when
 			// resolveLinkID is called with linkOutward direction; any other
 			// direction would yield zero matches and an error.
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-1", true}), nil, nil
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-1", true}), 0, nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID
@@ -1198,10 +1198,10 @@ func TestHandleWrite_Batch_Update_WithLinksUnlinksParent(t *testing.T) {
 			calls = append(calls, call{kind: "update", arg: key})
 			return nil
 		},
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			// Unlink active key is From=PROJ-3 → linkInward, so the other key
 			// (PROJ-9) sits on the outward side: activeIsOutward=false.
-			return makeIssueWithLinks(linkFixture{"55", "Blocks", "PROJ-9", false}), nil, nil
+			return makeIssueWithLinks(linkFixture{"55", "Blocks", "PROJ-9", false}), 0, nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			calls = append(calls, call{kind: "delete", arg: linkID})
@@ -1277,10 +1277,10 @@ func TestHandleWrite_Update_WithUnlinksByTriple(t *testing.T) {
 	deleted := ""
 	mc := &mockClient{
 		UpdateIssueV3Fn: func(_ context.Context, _ string, _ map[string]any) error { return nil },
-		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, _ string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			// Active key From=PROJ-1 → linkInward, so PROJ-2 is on the outward
 			// side: activeIsOutward=false.
-			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), nil, nil
+			return makeIssueWithLinks(linkFixture{"10042", "Blocks", "PROJ-2", false}), 0, nil
 		},
 		DeleteIssueLinkFn: func(_ context.Context, linkID string) error {
 			deleted = linkID

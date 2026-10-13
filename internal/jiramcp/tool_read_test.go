@@ -48,7 +48,7 @@ func TestHandleRead_MultipleModes(t *testing.T) {
 
 func TestReadByKeys_Success(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			return &jira.Issue{
 				Key: key,
 				ID:  "10001",
@@ -57,7 +57,7 @@ func TestReadByKeys_Success(t *testing.T) {
 					Status:  &jira.Status{Name: "Open"},
 					Type:    jira.IssueType{Name: "Bug"},
 				},
-			}, nil, nil
+			}, 0, nil
 		},
 	}
 	h := &handlers{client: mc}
@@ -70,11 +70,11 @@ func TestReadByKeys_Success(t *testing.T) {
 
 func TestReadByKeys_PassesFieldsAndExpand(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(_ context.Context, _ string, opts *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(_ context.Context, _ string, opts *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			assert.Equal(t, "summary,status", opts.Fields)
 			assert.Equal(t, "changelog", opts.Expand)
 			return &jira.Issue{Key: "P-1", Fields: &jira.IssueFields{Summary: "x"}, Changelog: oneHistoryChangelog()},
-				&jira.ChangelogPage{MaxResults: 100, Total: 112}, nil
+				112, nil
 		},
 	}
 	h := &handlers{client: mc}
@@ -143,8 +143,8 @@ func TestReadByKeys_PartialError(t *testing.T) {
 
 func TestReadByKeys_AllError(t *testing.T) {
 	mc := &mockClient{
-		GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
-			return nil, nil, fmt.Errorf("server error")
+		GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, int, error) {
+			return nil, 0, fmt.Errorf("server error")
 		},
 	}
 	h := &handlers{client: mc}
@@ -166,7 +166,7 @@ func TestReadByJQL_Success(t *testing.T) {
 					{ID: "1", Key: "PROJ-1", Fields: &jira.IssueFields{Summary: "One"}, Changelog: oneHistoryChangelog()},
 					{ID: "2", Key: "PROJ-2", Fields: &jira.IssueFields{Summary: "Two"}},
 				},
-				ChangelogPages: map[string]*jira.ChangelogPage{"1": {MaxResults: 40, Total: 112}},
+				ChangelogTotals: map[string]int{"1": 112},
 				Total:          2,
 			}, nil
 		},
@@ -471,7 +471,7 @@ func TestIssueToMap_AllFields(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	assert.Equal(t, "PROJ-1", m["key"])
 	assert.Equal(t, "10001", m["id"])
 
@@ -491,7 +491,7 @@ func TestIssueToMap_Changelog(t *testing.T) {
 	tests := []struct {
 		name      string
 		changelog *jira.Changelog
-		page      *jira.ChangelogPage
+		total     int
 		want      map[string]any
 	}{
 		{
@@ -530,20 +530,20 @@ func TestIssueToMap_Changelog(t *testing.T) {
 			}},
 		},
 		{
-			name:      "page with all histories is complete",
+			name:      "total equal to histories returned is complete",
 			changelog: oneHistoryChangelog(),
-			page:      &jira.ChangelogPage{StartAt: 0, MaxResults: 1, Total: 1},
+			total:     1,
 			want: map[string]any{
-				"startAt": 0, "maxResults": 1, "total": 1, "incomplete": false,
+				"total": 1, "incomplete": false,
 				"histories": []map[string]any{oneHistoryMap},
 			},
 		},
 		{
-			name:      "page with more histories than returned is incomplete",
+			name:      "total above histories returned is incomplete",
 			changelog: oneHistoryChangelog(),
-			page:      &jira.ChangelogPage{StartAt: 0, MaxResults: 1, Total: 112},
+			total:     112,
 			want: map[string]any{
-				"startAt": 0, "maxResults": 1, "total": 112, "incomplete": true,
+				"total": 112, "incomplete": true,
 				"histories": []map[string]any{oneHistoryMap},
 			},
 		},
@@ -554,7 +554,7 @@ func TestIssueToMap_Changelog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			issue := &jira.Issue{Key: "PROJ-1", Fields: &jira.IssueFields{Summary: "x"}, Changelog: tt.changelog}
 
-			m := issueToMap(issue, tt.page, nil)
+			m := issueToMap(issue, tt.total, nil)
 
 			if tt.want == nil {
 				assert.NotContains(t, m, "changelog")
@@ -590,7 +590,7 @@ func TestIssueToMap_Comments(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	comments, ok := fields["comment"].([]map[string]any)
 	require.True(t, ok)
@@ -614,7 +614,7 @@ func TestIssueToMap_NoComments(t *testing.T) {
 			Comments: &jira.Comments{Comments: []*jira.Comment{}},
 		},
 	}
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	_, has := fields["comment"]
 	assert.False(t, has)
@@ -645,7 +645,7 @@ func TestIssueToMap_Attachments(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	atts, ok := fields["attachments"].([]map[string]any)
 	require.True(t, ok)
@@ -673,7 +673,7 @@ func TestIssueToMap_NoAttachments(t *testing.T) {
 			Attachments: []*jira.Attachment{},
 		},
 	}
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	_, has := fields["attachments"]
 	assert.False(t, has)
@@ -688,7 +688,7 @@ func TestIssueToMap_Parent(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	assert.Equal(t, map[string]any{"id": "1000", "key": "PROJ-9"}, fields["parent"])
 }
@@ -700,7 +700,7 @@ func TestIssueToMap_NoParent(t *testing.T) {
 			Summary: "x",
 		},
 	}
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	_, has := fields["parent"]
 	assert.False(t, has)
@@ -726,7 +726,7 @@ func TestIssueToMap_IssueLinks(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	assert.Equal(t, []map[string]any{
 		{"id": "5001", "type": "Blocks", "from": "PROJ-1", "to": "PROJ-9"},
@@ -760,7 +760,7 @@ func TestIssueToMap_IssueLinks_SkipsMalformed(t *testing.T) {
 		},
 	}
 
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	assert.Equal(t, []map[string]any{
 		{"id": "5001", "type": "Blocks", "from": "PROJ-1", "to": "PROJ-9"},
@@ -771,7 +771,7 @@ func TestIssueToMap_IssueLinks_SkipsMalformed(t *testing.T) {
 func TestIssueToMap_NoIssueLinks(t *testing.T) {
 	t.Run("nil slice", func(t *testing.T) {
 		issue := &jira.Issue{Key: "PROJ-1", Fields: &jira.IssueFields{Summary: "x"}}
-		m := issueToMap(issue, nil, nil)
+		m := issueToMap(issue, 0, nil)
 		fields := m["fields"].(map[string]any)
 		_, has := fields["issuelinks"]
 		assert.False(t, has)
@@ -784,7 +784,7 @@ func TestIssueToMap_NoIssueLinks(t *testing.T) {
 				IssueLinks: []*jira.IssueLink{},
 			},
 		}
-		m := issueToMap(issue, nil, nil)
+		m := issueToMap(issue, 0, nil)
 		fields := m["fields"].(map[string]any)
 		_, has := fields["issuelinks"]
 		assert.False(t, has)
@@ -793,7 +793,7 @@ func TestIssueToMap_NoIssueLinks(t *testing.T) {
 
 func TestIssueToMap_NilFields(t *testing.T) {
 	issue := &jira.Issue{Key: "X-1", ID: "1"}
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	assert.Equal(t, "X-1", m["key"])
 	_, hasFields := m["fields"]
 	assert.False(t, hasFields)
@@ -845,7 +845,7 @@ func TestIssueToMap_IncludesCustomFields(t *testing.T) {
 				Key:    "PROJ-1",
 				Fields: &jira.IssueFields{Summary: "s", Unknowns: tc.unknowns},
 			}
-			fields := issueToMap(issue, nil, nil)["fields"].(map[string]any)
+			fields := issueToMap(issue, 0, nil)["fields"].(map[string]any)
 			for k, v := range tc.wantPresent {
 				assert.Equal(t, v, fields[k])
 			}
@@ -889,7 +889,7 @@ func TestIssueToMap_MinimalFields(t *testing.T) {
 			Summary: "Only summary",
 		},
 	}
-	m := issueToMap(issue, nil, nil)
+	m := issueToMap(issue, 0, nil)
 	fields := m["fields"].(map[string]any)
 	assert.Equal(t, "Only summary", fields["summary"])
 	_, hasStatus := fields["status"]
@@ -950,14 +950,14 @@ func TestRead_FieldFormat_HandlesADFAndPassThrough(t *testing.T) {
 					}
 					return []jira.Field{{ID: fieldID, Schema: tc.schema}}, nil
 				},
-				GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+				GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, int, error) {
 					return &jira.Issue{
 						Key: "K-1",
 						Fields: &jira.IssueFields{
 							Summary:  "s",
 							Unknowns: tcontainer.MarshalMap{fieldID: tc.value},
 						},
-					}, nil, nil
+					}, 0, nil
 				},
 			}
 			h := &handlers{client: mc}
@@ -983,11 +983,11 @@ func TestRead_FieldFormatRaw_MakesNoSchemaLookups(t *testing.T) {
 			fieldsCalls.Add(1)
 			return nil, nil
 		},
-		GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+		GetIssueFn: func(context.Context, string, *jira.GetQueryOptions) (*jira.Issue, int, error) {
 			return &jira.Issue{
 				Key:    "K-1",
 				Fields: &jira.IssueFields{Summary: "s"},
-			}, nil, nil
+			}, 0, nil
 		},
 	}
 	h := &handlers{client: mc}

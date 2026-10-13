@@ -15,7 +15,7 @@ type mockClient struct {
 	SearchUsersFn              func(ctx context.Context, query string) ([]jira.User, error)
 	GetCreateMetaIssueTypesFn  func(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error)
 	GetCreateMetaFieldsFn      func(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error)
-	GetIssueFn                 func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error)
+	GetIssueFn                 func(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, int, error)
 	SearchIssuesFn             func(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
 	CreateIssueV3Fn            func(ctx context.Context, payload map[string]any) (string, string, error)
 	UpdateIssueV3Fn            func(ctx context.Context, key string, payload map[string]any) error
@@ -79,7 +79,7 @@ func (m *mockClient) GetCreateMetaFields(ctx context.Context, projectKey, issueT
 	return m.GetCreateMetaFieldsFn(ctx, projectKey, issueTypeID)
 }
 
-func (m *mockClient) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
+func (m *mockClient) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, int, error) {
 	if m.GetIssueFn == nil {
 		panic(fmt.Sprintf("mockClient.GetIssue called but GetIssueFn not set (key=%s)", key))
 	}

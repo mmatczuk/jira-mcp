@@ -32,10 +32,3 @@ type (
 	Transition           = jira.Transition
 	User                 = jira.User
 )
-
-// ChangelogPage holds the paging counts that go-jira's Changelog drops.
-type ChangelogPage struct {
-	StartAt    int `json:"startAt"`
-	MaxResults int `json:"maxResults"`
-	Total      int `json:"total"`
-}
