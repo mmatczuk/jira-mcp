@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/andygrunwald/go-jira"
+	"github.com/google/go-querystring/query"
 )
 
 // ErrAttachmentTooLarge is returned by GetAttachmentBody when the body
@@ -475,16 +476,54 @@ func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
 	})
 }
 
-// GetIssue fetches an issue by key.
-func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {
+// GetIssue fetches an issue by key. The changelog total is 0 unless the
+// response embeds a changelog (expand=changelog).
+func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, int, error) {
 	var issue *jira.Issue
+	var changelogTotal int
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		var resp *jira.Response
-		var err error
-		issue, resp, err = c.j.Issue.GetWithContext(ctx, key, opts)
+		req, err := c.j.NewRequestWithContext(ctx, "GET", fmt.Sprintf("rest/api/2/issue/%s", key), nil)
+		if err != nil {
+			return nil, err
+		}
+		if opts != nil {
+			q, err := query.Values(opts)
+			if err != nil {
+				return nil, err
+			}
+			req.URL.RawQuery = q.Encode()
+		}
+		var result issueWithChangelogTotal
+		resp, err := c.j.Do(req, &result)
+		if err == nil {
+			issue, changelogTotal = &result.issue, result.changelogTotal
+		}
 		return resp, err
 	})
-	return issue, err
+	return issue, changelogTotal, err
+}
+
+// issueWithChangelogTotal decodes an issue together with the total history
+// count of its embedded changelog, which go-jira's Changelog drops.
+type issueWithChangelogTotal struct {
+	issue          jira.Issue
+	changelogTotal int
+}
+
+func (i *issueWithChangelogTotal) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &i.issue); err != nil {
+		return err
+	}
+	var changelog struct {
+		Changelog struct {
+			Total int `json:"total"`
+		} `json:"changelog"`
+	}
+	if err := json.Unmarshal(data, &changelog); err != nil {
+		return err
+	}
+	i.changelogTotal = changelog.Changelog.Total
+	return nil
 }
 
 // SearchOptionsV3 configures a JQL search via the v3 search/jql endpoint.
@@ -495,11 +534,13 @@ type SearchOptionsV3 struct {
 	Expand        string
 }
 
-// SearchResultV3 holds the response from a JQL search.
+// SearchResultV3 holds the response from a JQL search. ChangelogTotals is
+// keyed by issue ID and holds only the issues with an embedded changelog.
 type SearchResultV3 struct {
-	Issues        []jira.Issue
-	Total         int
-	NextPageToken string
+	Issues          []jira.Issue
+	ChangelogTotals map[string]int
+	Total           int
+	NextPageToken   string
 }
 
 // SearchIssues runs a JQL query using the v3 search/jql endpoint.
@@ -528,15 +569,22 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 		}
 
 		var result struct {
-			Issues        []jira.Issue `json:"issues"`
-			Total         int          `json:"total"`
-			NextPageToken string       `json:"nextPageToken"`
+			Issues        []issueWithChangelogTotal `json:"issues"`
+			Total         int                       `json:"total"`
+			NextPageToken string                    `json:"nextPageToken"`
 		}
 		resp, err := c.j.Do(req, &result)
 		sr = SearchResultV3{
-			Issues:        result.Issues,
-			Total:         result.Total,
-			NextPageToken: result.NextPageToken,
+			Issues:          make([]jira.Issue, 0, len(result.Issues)),
+			ChangelogTotals: map[string]int{},
+			Total:           result.Total,
+			NextPageToken:   result.NextPageToken,
+		}
+		for _, r := range result.Issues {
+			sr.Issues = append(sr.Issues, r.issue)
+			if r.changelogTotal > 0 {
+				sr.ChangelogTotals[r.issue.ID] = r.changelogTotal
+			}
 		}
 		return resp, err
 	})

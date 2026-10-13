@@ -9,6 +9,9 @@ type (
 	Attachment           = jira.Attachment
 	Board                = jira.Board
 	BoardListOptions     = jira.BoardListOptions
+	Changelog            = jira.Changelog
+	ChangelogHistory     = jira.ChangelogHistory
+	ChangelogItems       = jira.ChangelogItems
 	Comment              = jira.Comment
 	Comments             = jira.Comments
 	Field                = jira.Field

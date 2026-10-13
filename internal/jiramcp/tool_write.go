@@ -167,7 +167,7 @@ func resolveUnlinkDirection(activeKey string, u UnlinkItem) (dir linkDirection, 
 // matching (linkType, otherKey, direction). Returns an error mentioning
 // link_id if zero or more than one match.
 func (h *handlers) resolveLinkID(ctx context.Context, activeKey, linkType, otherKey string, dir linkDirection) (string, error) {
-	issue, err := h.client.GetIssue(ctx, activeKey, &jira.GetQueryOptions{Fields: "issuelinks"})
+	issue, _, err := h.client.GetIssue(ctx, activeKey, &jira.GetQueryOptions{Fields: "issuelinks"})
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s to resolve link id: %w", activeKey, err)
 	}

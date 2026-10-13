@@ -13,7 +13,7 @@ type JiraClient interface {
 	SearchUsers(ctx context.Context, query string) ([]jira.User, error)
 	GetCreateMetaIssueTypes(ctx context.Context, projectKey string) ([]jira.CreateMetaIssueType, error)
 	GetCreateMetaFields(ctx context.Context, projectKey, issueTypeID string) ([]jira.CreateMetaField, error)
-	GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error)
+	GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, int, error)
 	SearchIssues(ctx context.Context, jql string, opts *jira.SearchOptionsV3) (*jira.SearchResultV3, error)
 	CreateIssueV3(ctx context.Context, payload map[string]any) (string, string, error)
 	UpdateIssueV3(ctx context.Context, key string, payload map[string]any) error

@@ -29,7 +29,7 @@ type ReadArgs struct {
 	SprintState string `json:"sprint_state,omitempty" jsonschema:"Filter sprints by state: active, closed, future."`
 
 	Fields        string `json:"fields,omitempty" jsonschema:"Comma-separated field names to return (default: all)."`
-	Expand        string `json:"expand,omitempty" jsonschema:"Comma-separated expansions (e.g. renderedFields transitions changelog)."`
+	Expand        string `json:"expand,omitempty" jsonschema:"Comma-separated expansions (e.g. renderedFields transitions changelog; changelog lists changed field names without values)."`
 	Limit         int    `json:"limit,omitempty" jsonschema:"Max results to return. Default 100."`
 	StartAt       int    `json:"start_at,omitempty" jsonschema:"Pagination offset for resource listings (boards, sprints). Not used for JQL search."`
 	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Token for fetching the next page of JQL search results. Returned in previous search response."`
@@ -140,12 +140,12 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		if args.Expand != "" {
 			opts.Expand = args.Expand
 		}
-		issue, err := h.client.GetIssue(ctx, args.Keys[0], opts)
+		issue, changelogTotal, err := h.client.GetIssue(ctx, args.Keys[0], opts)
 		if err != nil {
 			return formatReadResult("Fetched 0 issue(s)", nil, []string{fmt.Sprintf("%s: %v", args.Keys[0], err)})
 		}
 		render := newCustomfieldRenderer(ctx, h.client, args)
-		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, render)}, nil)
+		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, changelogTotal, render)}, nil)
 	}
 
 	// Build issueKey in (...) JQL for multi-key fetch.
@@ -173,7 +173,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogTotals[sr.Issues[i].ID], render))
 	}
 	return formatReadResult(fmt.Sprintf("Fetched %d issue(s)", len(results)), results, nil)
 }
@@ -200,7 +200,7 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogTotals[sr.Issues[i].ID], render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) (total %d). JQL: %s", len(results), sr.Total, args.JQL)
@@ -337,7 +337,7 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range issues {
-		results = append(results, issueToMap(&issues[i], render))
+		results = append(results, issueToMap(&issues[i], 0, render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) in sprint %d", len(results), args.SprintID)
@@ -415,6 +415,40 @@ func commentToMap(c *jira.Comment) map[string]any {
 	return m
 }
 
+// changelogToMap omits fromString/toString: a description edit carries the
+// full old and new text, which would bloat the response.
+func changelogToMap(c *jira.Changelog, total int) (map[string]any, bool) {
+	if c == nil || len(c.Histories) == 0 {
+		return nil, false
+	}
+	histories := make([]map[string]any, 0, len(c.Histories))
+	for i := range c.Histories {
+		histories = append(histories, changelogHistoryToMap(&c.Histories[i]))
+	}
+	m := map[string]any{"histories": histories}
+	if total > 0 {
+		m["total"] = total
+		m["incomplete"] = total > len(histories)
+	}
+	return m, true
+}
+
+func changelogHistoryToMap(h *jira.ChangelogHistory) map[string]any {
+	items := make([]map[string]any, 0, len(h.Items))
+	for _, item := range h.Items {
+		items = append(items, map[string]any{
+			"field":     item.Field,
+			"fieldtype": item.FieldType,
+		})
+	}
+	return map[string]any{
+		"id":      h.Id,
+		"author":  userToMap(&h.Author),
+		"created": h.Created,
+		"items":   items,
+	}
+}
+
 func attachmentToMap(a *jira.Attachment) map[string]any {
 	m := map[string]any{
 		"id":        a.ID,
@@ -452,7 +486,9 @@ func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) 
 	}, true
 }
 
-func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
+// issueToMap builds the output for one issue. changelogTotal is the history
+// count of the embedded changelog, or 0 when the caller does not know it.
+func issueToMap(issue *jira.Issue, changelogTotal int, render customfieldRenderer) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
 		"id":   issue.ID,
@@ -536,6 +572,9 @@ func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
 			fields[k] = v
 		}
 		m["fields"] = fields
+	}
+	if changelog, ok := changelogToMap(issue.Changelog, changelogTotal); ok {
+		m["changelog"] = changelog
 	}
 
 	return m
