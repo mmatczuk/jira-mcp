@@ -4,25 +4,25 @@ cask "jira-mcp" do
     run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "jira-mcp"], chdir: "."
   end if OS.mac?
 
-  version "0.7.3"
+  version "0.8.0"
 
   on_macos do
     on_arm do
-      sha256 "f93a3d27ba3290268b8a6d1b437f020b6c89db8a4a11b91cd2de0fbd392fd371"
+      sha256 "a5fa9944ed0509e0d1f93b5df2eff6d3e5d68dda67a25f35efc9b8e5142b62a3"
       url "https://github.com/mmatczuk/jira-mcp/releases/download/v#{version}/jira-mcp_darwin_arm64.tar.gz"
     end
     on_intel do
-      sha256 "9ccf1063ffd666da571ca9b0a28e32855a9c2c582624ee584592ffd5cf99e924"
+      sha256 "ec70008cacb764075fb04ea119cb0bc3793b83abddc8d30ed46332d765339fd8"
       url "https://github.com/mmatczuk/jira-mcp/releases/download/v#{version}/jira-mcp_darwin_amd64.tar.gz"
     end
   end
   on_linux do
     on_arm do
-      sha256 "2040fbdcfb2141d43ab9ebed10d7c7cd4ca5b0f1d38eb4b9eb2ab17bcaf57da3"
+      sha256 "75ea9778cac95df077d0231043f8c4bf72e1e634cc4c7c5600820e2884234863"
       url "https://github.com/mmatczuk/jira-mcp/releases/download/v#{version}/jira-mcp_linux_arm64.tar.gz"
     end
     on_intel do
-      sha256 "e21d3d0010f23f1a3e4221943f466e0b9dbee9d768295f07a57907d5f1856fbb"
+      sha256 "df7d97d3c94b0bc49776e3e5f29939fad451588af7713b7d3223fdb4b0b7fcac"
       url "https://github.com/mmatczuk/jira-mcp/releases/download/v#{version}/jira-mcp_linux_amd64.tar.gz"
     end
   end
