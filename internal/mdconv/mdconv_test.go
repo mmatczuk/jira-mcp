@@ -159,28 +159,40 @@ func TestToADF_Italic(t *testing.T) {
 }
 
 func TestToADF_Link(t *testing.T) {
-	result := ToADF("Click [here](https://example.com)")
-	require.NotNil(t, result)
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "inline", in: "Click [here](https://example.com)"},
+		{name: "reference definition is not rendered", in: "Click [here][ref]\n\n[ref]: https://example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ToADF(tt.in)
+			require.NotNil(t, result)
 
-	content := result["content"].([]any)
-	para := content[0].(node)
-	inlines := para["content"].([]any)
+			content := result["content"].([]any)
+			require.Len(t, content, 1)
+			para := content[0].(node)
+			inlines := para["content"].([]any)
 
-	found := false
-	for _, inline := range inlines {
-		n := inline.(node)
-		if marks, ok := n["marks"]; ok {
-			for _, mark := range marks.([]any) {
-				if m, ok := mark.(node); ok && m["type"] == "link" {
-					found = true
-					attrs := m["attrs"].(node)
-					assert.Equal(t, "https://example.com", attrs["href"])
-					assert.Equal(t, "here", n["text"])
+			found := false
+			for _, inline := range inlines {
+				n := inline.(node)
+				if marks, ok := n["marks"]; ok {
+					for _, mark := range marks.([]any) {
+						if m, ok := mark.(node); ok && m["type"] == "link" {
+							found = true
+							attrs := m["attrs"].(node)
+							assert.Equal(t, "https://example.com", attrs["href"])
+							assert.Equal(t, "here", n["text"])
+						}
+					}
 				}
 			}
-		}
+			assert.True(t, found, "expected a text node with link mark")
+		})
 	}
-	assert.True(t, found, "expected a text node with link mark")
 }
 
 func TestToADF_Image(t *testing.T) {
