@@ -238,15 +238,15 @@ func newStatefulAttachmentStore(issue string) *statefulAttachmentStore {
 }
 
 func (s *statefulAttachmentStore) install(mc *mockClient) {
-	mc.GetIssueFn = func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, error) {
+	mc.GetIssueFn = func(_ context.Context, key string, _ *jira.GetQueryOptions) (*jira.Issue, *jira.ChangelogPage, error) {
 		if key != s.issue {
-			return nil, fmt.Errorf("issue %s not found", key)
+			return nil, nil, fmt.Errorf("issue %s not found", key)
 		}
 		atts := make([]*jira.Attachment, 0, len(s.atts))
 		for _, a := range s.atts {
 			atts = append(atts, a)
 		}
-		return &jira.Issue{Fields: &jira.IssueFields{Attachments: atts}}, nil
+		return &jira.Issue{Fields: &jira.IssueFields{Attachments: atts}}, nil, nil
 	}
 	mc.PostAttachmentTextFn = func(_ context.Context, key, filename, body string) (*jira.Attachment, error) {
 		if key != s.issue {

@@ -9,6 +9,9 @@ type (
 	Attachment           = jira.Attachment
 	Board                = jira.Board
 	BoardListOptions     = jira.BoardListOptions
+	Changelog            = jira.Changelog
+	ChangelogHistory     = jira.ChangelogHistory
+	ChangelogItems       = jira.ChangelogItems
 	Comment              = jira.Comment
 	Comments             = jira.Comments
 	Field                = jira.Field
@@ -29,3 +32,12 @@ type (
 	Transition           = jira.Transition
 	User                 = jira.User
 )
+
+// ChangelogPage holds the paging counts of an issue's embedded changelog,
+// which go-jira's Changelog drops. Jira caps the embedded histories (100 on
+// GET issue, 40 on search/jql), so Total can exceed the histories returned.
+type ChangelogPage struct {
+	StartAt    int `json:"startAt"`
+	MaxResults int `json:"maxResults"`
+	Total      int `json:"total"`
+}

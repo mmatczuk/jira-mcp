@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/andygrunwald/go-jira"
+	"github.com/google/go-querystring/query"
 )
 
 // ErrAttachmentTooLarge is returned by GetAttachmentBody when the body
@@ -475,16 +476,48 @@ func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
 	})
 }
 
-// GetIssue fetches an issue by key.
-func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, error) {
+// GetIssue fetches an issue by key. The page is nil unless the response
+// embeds a changelog (expand=changelog).
+func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOptions) (*jira.Issue, *ChangelogPage, error) {
 	var issue *jira.Issue
+	var page *ChangelogPage
 	err := c.retry(ctx, func() (*jira.Response, error) {
-		var resp *jira.Response
-		var err error
-		issue, resp, err = c.j.Issue.GetWithContext(ctx, key, opts)
+		req, err := c.j.NewRequestWithContext(ctx, "GET", fmt.Sprintf("rest/api/2/issue/%s", key), nil)
+		if err != nil {
+			return nil, err
+		}
+		if opts != nil {
+			q, err := query.Values(opts)
+			if err != nil {
+				return nil, err
+			}
+			req.URL.RawQuery = q.Encode()
+		}
+		var raw json.RawMessage
+		resp, err := c.j.Do(req, &raw)
+		if err != nil {
+			return resp, err
+		}
+		issue, page, err = decodeIssue(raw)
 		return resp, err
 	})
-	return issue, err
+	return issue, page, err
+}
+
+// decodeIssue decodes an issue and the paging counts of its embedded
+// changelog. The page is nil if the issue has no changelog.
+func decodeIssue(raw json.RawMessage) (*jira.Issue, *ChangelogPage, error) {
+	var issue jira.Issue
+	if err := json.Unmarshal(raw, &issue); err != nil {
+		return nil, nil, err
+	}
+	var paging struct {
+		Changelog *ChangelogPage `json:"changelog"`
+	}
+	if err := json.Unmarshal(raw, &paging); err != nil {
+		return nil, nil, err
+	}
+	return &issue, paging.Changelog, nil
 }
 
 // SearchOptionsV3 configures a JQL search via the v3 search/jql endpoint.
@@ -495,11 +528,13 @@ type SearchOptionsV3 struct {
 	Expand        string
 }
 
-// SearchResultV3 holds the response from a JQL search.
+// SearchResultV3 holds the response from a JQL search. ChangelogPages is
+// keyed by issue ID and holds only the issues with an embedded changelog.
 type SearchResultV3 struct {
-	Issues        []jira.Issue
-	Total         int
-	NextPageToken string
+	Issues         []jira.Issue
+	ChangelogPages map[string]*ChangelogPage
+	Total          int
+	NextPageToken  string
 }
 
 // SearchIssues runs a JQL query using the v3 search/jql endpoint.
@@ -528,17 +563,31 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 		}
 
 		var result struct {
-			Issues        []jira.Issue `json:"issues"`
-			Total         int          `json:"total"`
-			NextPageToken string       `json:"nextPageToken"`
+			Issues        []json.RawMessage `json:"issues"`
+			Total         int               `json:"total"`
+			NextPageToken string            `json:"nextPageToken"`
 		}
 		resp, err := c.j.Do(req, &result)
-		sr = SearchResultV3{
-			Issues:        result.Issues,
-			Total:         result.Total,
-			NextPageToken: result.NextPageToken,
+		if err != nil {
+			return resp, err
 		}
-		return resp, err
+		sr = SearchResultV3{
+			Issues:         make([]jira.Issue, 0, len(result.Issues)),
+			ChangelogPages: map[string]*ChangelogPage{},
+			Total:          result.Total,
+			NextPageToken:  result.NextPageToken,
+		}
+		for _, raw := range result.Issues {
+			issue, page, err := decodeIssue(raw)
+			if err != nil {
+				return resp, err
+			}
+			sr.Issues = append(sr.Issues, *issue)
+			if page != nil {
+				sr.ChangelogPages[issue.ID] = page
+			}
+		}
+		return resp, nil
 	})
 	return &sr, err
 }

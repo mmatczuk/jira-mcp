@@ -47,6 +47,7 @@ var readTool = &mcp.Tool{
 
 Common options: fields (comma-separated), expand, limit (default 100), start_at, field_format.
 field_format=markdown converts ADF rich-text custom fields (jira_schema reports content_format="adf") to Markdown server-side. Default raw passes ADF through unchanged.
+expand=changelog adds changelog.histories to each issue: id, created, author, and items naming each changed field and fieldtype (custom fields by display name). Old and new values are omitted. Jira caps the embedded histories and returns the newest first; changelog.total is the full count and changelog.incomplete is true when histories were dropped.
 Hint: Use jira_schema resource=transitions with an issue_key to find valid transition IDs before transitioning.
 
 Descriptions and comments for older issues are returned in Jira wiki-markup, not Markdown. Do not feed a description/comment string from jira_read straight back into jira_write — the default write path expects Markdown and will reject recognised wiki-markup tokens. Either convert to Markdown, or set description_format="wiki" / comment_format="wiki" on the write to preserve wiki-markup input.`,
@@ -140,12 +141,12 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 		if args.Expand != "" {
 			opts.Expand = args.Expand
 		}
-		issue, err := h.client.GetIssue(ctx, args.Keys[0], opts)
+		issue, page, err := h.client.GetIssue(ctx, args.Keys[0], opts)
 		if err != nil {
 			return formatReadResult("Fetched 0 issue(s)", nil, []string{fmt.Sprintf("%s: %v", args.Keys[0], err)})
 		}
 		render := newCustomfieldRenderer(ctx, h.client, args)
-		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, render)}, nil)
+		return formatReadResult("Fetched 1 issue(s)", []map[string]any{issueToMap(issue, page, render)}, nil)
 	}
 
 	// Build issueKey in (...) JQL for multi-key fetch.
@@ -173,7 +174,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogPages[sr.Issues[i].ID], render))
 	}
 	return formatReadResult(fmt.Sprintf("Fetched %d issue(s)", len(results)), results, nil)
 }
@@ -200,7 +201,7 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range sr.Issues {
-		results = append(results, issueToMap(&sr.Issues[i], render))
+		results = append(results, issueToMap(&sr.Issues[i], sr.ChangelogPages[sr.Issues[i].ID], render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) (total %d). JQL: %s", len(results), sr.Total, args.JQL)
@@ -337,7 +338,7 @@ func (h *handlers) readSprintIssues(ctx context.Context, args ReadArgs) *mcp.Cal
 	render := newCustomfieldRenderer(ctx, h.client, args)
 	var results []map[string]any
 	for i := range issues {
-		results = append(results, issueToMap(&issues[i], render))
+		results = append(results, issueToMap(&issues[i], nil, render))
 	}
 
 	summary := fmt.Sprintf("Found %d issue(s) in sprint %d", len(results), args.SprintID)
@@ -415,6 +416,45 @@ func commentToMap(c *jira.Comment) map[string]any {
 	return m
 }
 
+// changelogToMap keeps only the changed field names of each item. A
+// description edit carries the full old and new text in fromString/toString,
+// which would bloat the response; callers that need the values can read the
+// fields directly. Jira caps the embedded histories, so when the page is
+// known, incomplete reports whether Jira has more histories than it returned.
+func changelogToMap(c *jira.Changelog, page *jira.ChangelogPage) (map[string]any, bool) {
+	if c == nil || len(c.Histories) == 0 {
+		return nil, false
+	}
+	histories := make([]map[string]any, 0, len(c.Histories))
+	for i := range c.Histories {
+		histories = append(histories, changelogHistoryToMap(&c.Histories[i]))
+	}
+	m := map[string]any{"histories": histories}
+	if page != nil {
+		m["startAt"] = page.StartAt
+		m["maxResults"] = page.MaxResults
+		m["total"] = page.Total
+		m["incomplete"] = page.Total > len(histories)
+	}
+	return m, true
+}
+
+func changelogHistoryToMap(h *jira.ChangelogHistory) map[string]any {
+	items := make([]map[string]any, 0, len(h.Items))
+	for _, item := range h.Items {
+		items = append(items, map[string]any{
+			"field":     item.Field,
+			"fieldtype": item.FieldType,
+		})
+	}
+	return map[string]any{
+		"id":      h.Id,
+		"author":  userToMap(&h.Author),
+		"created": h.Created,
+		"items":   items,
+	}
+}
+
 func attachmentToMap(a *jira.Attachment) map[string]any {
 	m := map[string]any{
 		"id":        a.ID,
@@ -452,7 +492,9 @@ func issueLinkToMap(activeKey string, l *jira.IssueLink) (map[string]any, bool) 
 	}, true
 }
 
-func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
+// issueToMap builds the output for one issue. page is the paging counts of
+// the embedded changelog, or nil when the caller has none.
+func issueToMap(issue *jira.Issue, page *jira.ChangelogPage, render customfieldRenderer) map[string]any {
 	m := map[string]any{
 		"key":  issue.Key,
 		"id":   issue.ID,
@@ -536,6 +578,9 @@ func issueToMap(issue *jira.Issue, render customfieldRenderer) map[string]any {
 			fields[k] = v
 		}
 		m["fields"] = fields
+	}
+	if changelog, ok := changelogToMap(issue.Changelog, page); ok {
+		m["changelog"] = changelog
 	}
 
 	return m
