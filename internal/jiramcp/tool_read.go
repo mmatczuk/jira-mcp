@@ -29,7 +29,7 @@ type ReadArgs struct {
 	SprintState string `json:"sprint_state,omitempty" jsonschema:"Filter sprints by state: active, closed, future."`
 
 	Fields        string `json:"fields,omitempty" jsonschema:"Comma-separated field names to return (default: all)."`
-	Expand        string `json:"expand,omitempty" jsonschema:"Comma-separated expansions (e.g. renderedFields transitions changelog)."`
+	Expand        string `json:"expand,omitempty" jsonschema:"Comma-separated expansions (e.g. renderedFields transitions changelog; changelog lists changed field names without values)."`
 	Limit         int    `json:"limit,omitempty" jsonschema:"Max results to return. Default 100."`
 	StartAt       int    `json:"start_at,omitempty" jsonschema:"Pagination offset for resource listings (boards, sprints). Not used for JQL search."`
 	NextPageToken string `json:"next_page_token,omitempty" jsonschema:"Token for fetching the next page of JQL search results. Returned in previous search response."`
