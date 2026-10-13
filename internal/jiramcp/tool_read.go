@@ -157,7 +157,7 @@ func (h *handlers) readByKeys(ctx context.Context, args ReadArgs) *mcp.CallToolR
 
 	opts := &jira.SearchOptionsV3{MaxResults: len(args.Keys)}
 	if args.Fields != "" {
-		for _, f := range strings.Split(args.Fields, ",") {
+		for f := range strings.SplitSeq(args.Fields, ",") {
 			opts.Fields = append(opts.Fields, strings.TrimSpace(f))
 		}
 	}
@@ -184,7 +184,7 @@ func (h *handlers) readByJQL(ctx context.Context, args ReadArgs) *mcp.CallToolRe
 		NextPageToken: args.NextPageToken,
 	}
 	if args.Fields != "" {
-		for _, f := range strings.Split(args.Fields, ",") {
+		for f := range strings.SplitSeq(args.Fields, ",") {
 			opts.Fields = append(opts.Fields, strings.TrimSpace(f))
 		}
 	}
@@ -250,10 +250,8 @@ func (h *handlers) readProjects(ctx context.Context) *mcp.CallToolResult {
 
 func (h *handlers) readBoards(ctx context.Context, args ReadArgs) *mcp.CallToolResult {
 	opts := &jira.BoardListOptions{
-		SearchOptions: jira.SearchOptions{
-			MaxResults: args.Limit,
-			StartAt:    args.StartAt,
-		},
+		MaxResults: args.Limit,
+		StartAt:    args.StartAt,
 	}
 	if args.ProjectKey != "" {
 		opts.ProjectKeyOrID = args.ProjectKey
@@ -293,10 +291,8 @@ func (h *handlers) readSprints(ctx context.Context, args ReadArgs) *mcp.CallTool
 	}
 
 	opts := &jira.GetAllSprintsOptions{
-		SearchOptions: jira.SearchOptions{
-			MaxResults: args.Limit,
-			StartAt:    args.StartAt,
-		},
+		MaxResults: args.Limit,
+		StartAt:    args.StartAt,
 	}
 	if args.SprintState != "" {
 		opts.State = args.SprintState
@@ -587,26 +583,27 @@ func issueToMap(issue *jira.Issue, changelogTotal int, render customfieldRendere
 const customFieldPrefix = "customfield_"
 
 func formatReadResult(summary string, results []map[string]any, errors []string) *mcp.CallToolResult {
-	out := summary + "\n\n"
+	var out strings.Builder
+	out.WriteString(summary + "\n\n")
 
 	if len(errors) > 0 {
-		out += "Errors:\n"
+		out.WriteString("Errors:\n")
 		for _, e := range errors {
-			out += "  - " + e + "\n"
+			out.WriteString("  - " + e + "\n")
 		}
-		out += "\n"
+		out.WriteString("\n")
 	}
 
 	if len(results) > 0 {
 		data, err := json.Marshal(results)
 		if err != nil {
-			out += fmt.Sprintf("Failed to serialize results: %v", err)
+			fmt.Fprintf(&out, "Failed to serialize results: %v", err)
 		} else {
-			out += string(data)
+			out.Write(data)
 		}
 	}
 
-	return textResult(out, false)
+	return textResult(out.String(), false)
 }
 
 func textResult(msg string, isError bool) *mcp.CallToolResult {

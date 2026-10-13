@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -441,10 +442,7 @@ func (h *handlers) handleMoveToSprint(ctx context.Context, args WriteArgs) *mcp.
 // caller can use to opt in (e.g. `description_format="wiki"`).
 func wikiMarkupError(field, optHint string, hits []mdconv.WikiMarkupHit) error {
 	const maxHits = 5
-	n := len(hits)
-	if n > maxHits {
-		n = maxHits
-	}
+	n := min(len(hits), maxHits)
 	examples := make([]string, n)
 	for i := 0; i < n; i++ {
 		examples[i] = fmt.Sprintf("%s (line %d)", hits[i].Token, hits[i].LineNumber+1)
@@ -552,9 +550,7 @@ func buildIssuePayload(item WriteItem) (payload map[string]any, format string, e
 		if err := json.Unmarshal([]byte(item.FieldsJSON), &extra); err != nil {
 			return nil, "", fmt.Errorf("invalid fields_json: %w. Hint: Provide a valid JSON object like {\"customfield_10001\": \"value\"}", err)
 		}
-		for k, v := range extra {
-			fields[k] = v
-		}
+		maps.Copy(fields, extra)
 	}
 
 	return map[string]any{"fields": fields}, format, nil
