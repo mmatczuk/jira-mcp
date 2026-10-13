@@ -493,31 +493,35 @@ func (c *Client) GetIssue(ctx context.Context, key string, opts *jira.GetQueryOp
 			}
 			req.URL.RawQuery = q.Encode()
 		}
-		var raw json.RawMessage
-		resp, err := c.j.Do(req, &raw)
-		if err != nil {
-			return resp, err
+		var result issueWithPage
+		resp, err := c.j.Do(req, &result)
+		if err == nil {
+			issue, page = &result.issue, result.page
 		}
-		issue, page, err = decodeIssue(raw)
 		return resp, err
 	})
 	return issue, page, err
 }
 
-// decodeIssue decodes an issue and the paging counts of its embedded
-// changelog. The page is nil if the issue has no changelog.
-func decodeIssue(raw json.RawMessage) (*jira.Issue, *ChangelogPage, error) {
-	var issue jira.Issue
-	if err := json.Unmarshal(raw, &issue); err != nil {
-		return nil, nil, err
+// issueWithPage decodes an issue together with the paging counts of its
+// embedded changelog, which go-jira's Changelog drops.
+type issueWithPage struct {
+	issue jira.Issue
+	page  *ChangelogPage
+}
+
+func (i *issueWithPage) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &i.issue); err != nil {
+		return err
 	}
 	var paging struct {
 		Changelog *ChangelogPage `json:"changelog"`
 	}
-	if err := json.Unmarshal(raw, &paging); err != nil {
-		return nil, nil, err
+	if err := json.Unmarshal(data, &paging); err != nil {
+		return err
 	}
-	return &issue, paging.Changelog, nil
+	i.page = paging.Changelog
+	return nil
 }
 
 // SearchOptionsV3 configures a JQL search via the v3 search/jql endpoint.
@@ -563,31 +567,24 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, opts *SearchOptio
 		}
 
 		var result struct {
-			Issues        []json.RawMessage `json:"issues"`
-			Total         int               `json:"total"`
-			NextPageToken string            `json:"nextPageToken"`
+			Issues        []issueWithPage `json:"issues"`
+			Total         int             `json:"total"`
+			NextPageToken string          `json:"nextPageToken"`
 		}
 		resp, err := c.j.Do(req, &result)
-		if err != nil {
-			return resp, err
-		}
 		sr = SearchResultV3{
 			Issues:         make([]jira.Issue, 0, len(result.Issues)),
 			ChangelogPages: map[string]*ChangelogPage{},
 			Total:          result.Total,
 			NextPageToken:  result.NextPageToken,
 		}
-		for _, raw := range result.Issues {
-			issue, page, err := decodeIssue(raw)
-			if err != nil {
-				return resp, err
-			}
-			sr.Issues = append(sr.Issues, *issue)
-			if page != nil {
-				sr.ChangelogPages[issue.ID] = page
+		for _, r := range result.Issues {
+			sr.Issues = append(sr.Issues, r.issue)
+			if r.page != nil {
+				sr.ChangelogPages[r.issue.ID] = r.page
 			}
 		}
-		return resp, nil
+		return resp, err
 	})
 	return &sr, err
 }

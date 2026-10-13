@@ -510,7 +510,7 @@ func TestIssueToMap_Changelog(t *testing.T) {
 					Author:  jira.User{DisplayName: "Bob", AccountID: "def"},
 					Created: "2026-10-13T10:00:00.000+0100",
 					Items: []jira.ChangelogItems{
-						{Field: "AI Notes", FieldType: "custom", FromString: "old notes", ToString: "new notes"},
+						{Field: "Story Points", FieldType: "custom", FromString: "3", ToString: "5"},
 					},
 				},
 			}},
@@ -525,7 +525,7 @@ func TestIssueToMap_Changelog(t *testing.T) {
 					"id":      "201",
 					"author":  map[string]any{"displayName": "Bob", "accountId": "def"},
 					"created": "2026-10-13T10:00:00.000+0100",
-					"items":   []map[string]any{{"field": "AI Notes", "fieldtype": "custom"}},
+					"items":   []map[string]any{{"field": "Story Points", "fieldtype": "custom"}},
 				},
 			}},
 		},

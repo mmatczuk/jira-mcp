@@ -415,11 +415,8 @@ func commentToMap(c *jira.Comment) map[string]any {
 	return m
 }
 
-// changelogToMap keeps only the changed field names of each item. A
-// description edit carries the full old and new text in fromString/toString,
-// which would bloat the response; callers that need the values can read the
-// fields directly. Jira caps the embedded histories, so when the page is
-// known, incomplete reports whether Jira has more histories than it returned.
+// changelogToMap omits fromString/toString: a description edit carries the
+// full old and new text, which would bloat the response.
 func changelogToMap(c *jira.Changelog, page *jira.ChangelogPage) (map[string]any, bool) {
 	if c == nil || len(c.Histories) == 0 {
 		return nil, false
