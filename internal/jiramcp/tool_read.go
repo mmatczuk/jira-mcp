@@ -47,7 +47,6 @@ var readTool = &mcp.Tool{
 
 Common options: fields (comma-separated), expand, limit (default 100), start_at, field_format.
 field_format=markdown converts ADF rich-text custom fields (jira_schema reports content_format="adf") to Markdown server-side. Default raw passes ADF through unchanged.
-expand=changelog adds changelog.histories to each issue: id, created, author, and items naming each changed field and fieldtype (custom fields by display name). Old and new values are omitted. Jira caps the embedded histories and returns the newest first; changelog.total is the full count and changelog.incomplete is true when histories were dropped.
 Hint: Use jira_schema resource=transitions with an issue_key to find valid transition IDs before transitioning.
 
 Descriptions and comments for older issues are returned in Jira wiki-markup, not Markdown. Do not feed a description/comment string from jira_read straight back into jira_write — the default write path expects Markdown and will reject recognised wiki-markup tokens. Either convert to Markdown, or set description_format="wiki" / comment_format="wiki" on the write to preserve wiki-markup input.`,
